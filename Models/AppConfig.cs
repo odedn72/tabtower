@@ -247,6 +247,10 @@ public class SessionConfig
     /// another instance's window, which knows nothing about them and opened blank tabs.</summary>
     public string GroupId { get; set; } = "";
     public DateTime? LastMessageAtUtc { get; set; }  // last real conversation event (transcript)
+    public int TabHostPid { get; set; }              // extension host last seen holding its tab, 0 = never
+    public int? BoardOpen { get; set; }              // a board session's open questions, null = not a board (0.11.32)
+    public DateTime? PinnedAt { get; set; }          // pinned to the top of its window's block, null = not pinned (0.11.34)
+    public bool TurnFromPeer { get; set; }           // the current turn was started by another session's message (0.11.38)
 }
 
 /// <summary>Session status → border style. Lives in config so the mapping can change

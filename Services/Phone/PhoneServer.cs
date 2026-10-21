@@ -37,6 +37,11 @@ public sealed class PhoneServer : IDisposable
         "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", RegexOptions.Compiled);
     private static readonly Regex CardKey = new("^ws:[0-9]{1,6}(:[A-Za-z0-9_-]{1,32})?$", RegexOptions.Compiled);
     private static readonly Regex GroupId = new("^[A-Za-z0-9_-]{0,32}$", RegexOptions.Compiled);
+    // A task number is whatever the tasks file calls it (often a dotted number, sometimes a word
+    // in any script), so only its length and the absence of control characters are checked; it
+    // is matched against the file, never used as a path or a command.
+    private static readonly Regex TaskId = new(@"^[^\p{C}]{1,64}$", RegexOptions.Compiled);
+    private static readonly Regex LaunchOption = new("^[a-z+]{0,20}$", RegexOptions.Compiled);
     private static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
     private readonly IPhoneBackend _backend;
@@ -132,6 +137,10 @@ public sealed class PhoneServer : IDisposable
             ("POST", "/api/new") => await Exclusive(() => New(req)),
             ("POST", "/api/close") => await Exclusive(() => Close(req)),
             ("POST", "/api/reopen") => await Exclusive(() => Reopen(req)),
+            ("GET", "/api/tasks") => JsonResponse(200, new { ok = true, tasks = await _backend.ListTasksAsync() }),
+            ("GET", "/api/tasks/find") => await FindTask(req),
+            ("POST", "/api/tasks/start") => await Exclusive(() => StartTask(req)),
+            ("POST", "/api/tasks/nav") => await Exclusive(() => NavigateTasks(req)),
             _ => UnknownRoute(req),
         };
     }
@@ -266,6 +275,43 @@ public sealed class PhoneServer : IDisposable
         string? link = r.Ok ? await WaitForLink(id, TimeSpan.FromSeconds(15)) : null;
         return JsonResponse(r.Ok ? 200 : r.Error is "not_found" ? 404 : 409,
             new { ok = r.Ok, error = r.Error, detail = r.Detail, link });
+    }
+
+    private async Task<HttpResponseData> FindTask(HttpRequestData req)
+    {
+        string id = req.QueryValue("id").Trim().TrimStart('#');
+        if (!TaskId.IsMatch(id)) return Error(400, "bad_request");
+        var task = await _backend.FindTaskAsync(id);
+        return task == null ? Error(404, "no_task") : JsonResponse(200, new { ok = true, task });
+    }
+
+    private async Task<HttpResponseData> StartTask(HttpRequestData req)
+    {
+        var body = ParseBody(req);
+        string id = Prop(body, "id").Trim().TrimStart('#'), option = Prop(body, "option");
+        bool fast = body is { } b && b.TryGetProperty("fast", out var f) && f.ValueKind == JsonValueKind.True;
+        if (!TaskId.IsMatch(id) || !LaunchOption.IsMatch(option)) return Error(400, "bad_request");
+        _log($"task session: task={Trunc(id, 64)} option={(option.Length > 0 ? option : "-")}{(fast ? " fast" : "")}");
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+        var r = await _backend.StartTaskAsync(id, option, fast, cts.Token);
+        _log($"task session result: ok={r.Ok} error={r.Error ?? "-"} launching={r.Launching} id={r.SessionId ?? "-"}");
+        string? link = r.Ok && r.SessionId != null ? await WaitForLink(r.SessionId, TimeSpan.FromSeconds(10)) : null;
+        return JsonResponse(r.Ok ? 200 : r.Error is "no_task" ? 404 : 409, new
+        {
+            ok = r.Ok, error = r.Error, detail = r.Detail, launching = r.Launching, sessionId = r.SessionId, link,
+            prompt = r.Prompt,
+        });
+    }
+
+    private async Task<HttpResponseData> NavigateTasks(HttpRequestData req)
+    {
+        var body = ParseBody(req);
+        string kind = Prop(body, "kind"), id = Prop(body, "id");
+        if (kind is not ("task" or "nav" or "home") || (kind != "home" && !TaskId.IsMatch(id))) return Error(400, "bad_request");
+        _log($"tasks navigate: {kind} {Trunc(id, 64)}");
+        var r = await _backend.NavigateTasksAsync(kind, id);
+        _log($"tasks navigate result: ok={r.Ok} error={r.Error ?? "-"}");
+        return JsonResponse(r.Ok ? 200 : r.Error is "not_found" ? 404 : 409, new { ok = r.Ok, error = r.Error, detail = r.Detail });
     }
 
     /// <summary>One action at a time: two quick taps must not open two sessions.</summary>

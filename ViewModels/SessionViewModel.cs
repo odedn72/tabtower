@@ -154,6 +154,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IBlinkable
     /// must not be read as death for it. Runtime only.</summary>
     public bool ResumedInTerminal { get; set; }
 
+    /// <summary>Process id of the VSCode extension host whose window was last seen holding
+    /// this session's tab (the connector's own pid), 0 while never seen. A reload or a dead
+    /// instance always comes back as a NEW extension host, so "that pid is still the
+    /// connector" means the window that ran the session is the same one, still up, and
+    /// Claude Code there can resume the session into a panel. Persisted, so a deck restart
+    /// between the tab closing and the click does not lose it.</summary>
+    public int TabHostPid { get; set; }
+
     /// <summary>How many times the deck has asked the extension to close this `replaced`
     /// session's dead tab, and when it last did. Bounded so a window whose extension cannot
     /// (an old version, a label that does not match) is asked a few times and then left alone
@@ -422,6 +430,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IBlinkable
             if (_dispatchedRuns > 0) lines.Add(DispatchedRunsTip);
             if (ActiveWatches > 0) lines.Add(WatchesTip);
             if (ActiveJobs > 0) lines.Add(JobsTip);
+            if (IsBoard) lines.Add(BoardTip);
+            if (IsPinned) lines.Add("pinned: always the first row of its window (right-click to unpin)");
+            if (UpdatedByPeer) lines.Add("this turn answered a message from another session, not you: " +
+                                         "a question for you would be on this window's question board");
             // First of the chips' lines when it fires: it is the only one that says the card's
             // own content may be untrustworthy.
             if (_forked) lines.Insert(0, ForkedTip);
@@ -639,6 +651,112 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IBlinkable
             : _backgroundAgents == 1
                 ? "1 subagent is still running; the session resumes on its own when it reports back"
                 : $"{_backgroundAgents} subagents are still running; the session resumes on its own when they report back";
+
+    private int? _boardOpen;
+    /// <summary>Set only on a BOARD session: one whose whole job is to hold the other sessions'
+    /// questions for the user and carry the answers back. null = an
+    /// ordinary session. The value is how many questions are open on its board, reported by the
+    /// session itself on every turn (`session board --open n`).
+    ///
+    /// Why it exists: a board ends EVERY turn with a message to the user, so its turn ending
+    /// says nothing about whether it needs the user, and purple "your turn" on it was a false alarm
+    /// whenever the board was empty (asked for 17-10-2026: one clear mark while it waits for the
+    /// user, another while it does not). Like <see cref="WaitingOnMachine"/> this is a
+    /// presentation rule over `done`; the status underneath is untouched. Persisted, so a restart
+    /// keeps the card honest until the session's next turn.</summary>
+    public int? BoardOpen
+    {
+        get => _boardOpen;
+        set
+        {
+            if (_boardOpen == value) return;
+            // More open questions than before is news: blink again even if the card was
+            // already acknowledged.
+            if (value > (_boardOpen ?? 0)) _acknowledged = false;
+            _boardOpen = value;
+            Raise();
+            Raise(nameof(IsBoard));
+            Raise(nameof(HasBoardQuestions));
+            Raise(nameof(BoardText));
+            Raise(nameof(BoardTip));
+            RaiseVisuals();
+        }
+    }
+
+    public bool IsBoard => _boardOpen != null;
+    public bool HasBoardQuestions => _boardOpen > 0;
+
+    /// <summary>The turn ended and questions are waiting on the board: the user is needed, and
+    /// the card says so in its own colour rather than the generic purple.</summary>
+    public bool BoardWaiting => !_closed && _status == SessionStatus.Done && _boardOpen > 0;
+
+    /// <summary>The turn ended and the board is empty: nothing here needs the user.</summary>
+    public bool BoardEmpty => !_closed && _status == SessionStatus.Done && _boardOpen == 0;
+
+    /// <summary>The board chip: 📋 alone while empty, 📋 + count while questions wait.</summary>
+    public string BoardText => _boardOpen > 0 ? $"📋{_boardOpen}" : "📋";
+
+    public string BoardTip => _boardOpen switch
+    {
+        null => "",
+        0 => "question board: nothing is open on it, so this card is not asking for you",
+        1 => "question board: 1 question from another session is waiting for your answer here",
+        var n => $"question board: {n} questions from other sessions are waiting for your answer here",
+    };
+
+    private DateTime? _pinnedAt;
+    /// <summary>When the user pinned this session to the top of its window's block, null = not
+    /// pinned. A pinned OPEN session sorts above every unpinned one in the same window, so it stops
+    /// moving with activity (a session the user keeps coming back to can hold the first row, and
+    /// another session may sometimes need that place instead). A time rather
+    /// than a flag so two pins in one window still have a fixed order: the newest pin is first, so
+    /// pinning a second session puts it above the first without taking the first one's pin away.
+    /// Closed sessions ignore it (they sort below the open ones anyway) and get it back on resume.
+    /// Persisted.</summary>
+    public DateTime? PinnedAt
+    {
+        get => _pinnedAt;
+        set
+        {
+            if (_pinnedAt == value) return;
+            _pinnedAt = value;
+            Raise();
+            Raise(nameof(IsPinned));
+            Raise(nameof(PinMenuHeader));
+            Raise(nameof(TooltipText));
+        }
+    }
+
+    public bool IsPinned => _pinnedAt != null;
+
+    /// <summary>The row's right-click menu item, which toggles the pin.</summary>
+    public string PinMenuHeader => IsPinned ? "Unpin from the top" : "Pin to the top of its window";
+
+    private bool _turnFromPeer;
+    /// <summary>The current turn was started by a message another session sent, not by a prompt
+    /// the user typed. Set on every real prompt (a machine wakeup mid-turn leaves it as it was).
+    /// Persisted, so a restart keeps the card honest until the next prompt. See
+    /// <see cref="UpdatedByPeer"/>.</summary>
+    public bool TurnFromPeer
+    {
+        get => _turnFromPeer;
+        set { if (_turnFromPeer != value) { _turnFromPeer = value; Raise(); RaiseVisuals(); } }
+    }
+
+    /// <summary>Whether another open session in this session's window keeps a question board.
+    /// Injected once at startup by the main window, which can see every card.</summary>
+    public static Func<SessionViewModel, bool> WindowHasBoard { get; set; } = _ => false;
+
+    /// <summary>The turn ended, the user did not start it (another session sent the message
+    /// that did), and the window keeps a question board. Then the turn's end is not a request for
+    /// the user: in such a window a question for the user goes on the board, which says so in its
+    /// own colour. Asked for 20-10-2026, after a session that received a "no action needed" note
+    /// from another session and answered with a short report lit up as "your turn". Like the
+    /// board states this is a presentation rule over `done`; the status underneath is untouched.
+    /// Outside a window with a board nothing changes, because there a session that needs the user
+    /// has no other way to say so than ending its turn.</summary>
+    public bool UpdatedByPeer => !_closed && _status == SessionStatus.Done && _turnFromPeer &&
+                                 _boardOpen == null && WindowHasBoard(this);
 
     public bool HasDispatchedRuns => _dispatchedRuns > 0;
 
@@ -945,6 +1063,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IBlinkable
             Raise(nameof(TokensText));
             Raise(nameof(TokensTip));
             Raise(nameof(TooltipText));
+            RaiseCacheWarmth();
         }
     }
 
@@ -962,7 +1081,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IBlinkable
             var lines = new List<string>
             {
                 $"Used so far: {Compact(t.Weighted)} tokens over {t.Requests} turn{(t.Requests == 1 ? "" : "s")} " +
-                $"(weighted by price: {Compact(t.Raw)} raw, and a cache read counts as a tenth)",
+                $"(weighted by price: {Compact(t.Raw)} raw, and a cache read counts as a tenth or less)",
                 $"    cache reads {Compact(t.CacheRead)} → {Compact(t.CacheReadWeighted)}  ·  " +
                 $"cache writes {Compact(t.CacheWrite)} → {Compact(t.CacheWriteWeighted)}  ·  " +
                 $"output {Compact(t.Output)} → {Compact(t.OutputWeighted)}  ·  " +
@@ -973,6 +1092,109 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IBlinkable
                           $"({t.ContextNow * 100 / t.ContextWindow}% full)");
             return string.Join(Environment.NewLine, lines);
         }
+    }
+
+    // ---- the prompt cache clock (0.11.21) ----
+
+    /// <summary>Below this much context an expired cache costs too little to warn about: the
+    /// chip still counts down, but it never turns yellow and disappears once cold.</summary>
+    private const long CacheWarnFloor = 50_000;
+
+    /// <summary>The last stretch of the cache lifetime, when the chip turns yellow.</summary>
+    private static readonly TimeSpan CacheCoolingWindow = TimeSpan.FromMinutes(15);
+
+    /// <summary>Time left before the prompt cache expires. Every request that reads the cache
+    /// restarts its timer, counted from the request's START, so this is the last main-thread
+    /// request's start plus the TTL its newest write used. Null when unknown.</summary>
+    private TimeSpan? CacheRemaining =>
+        _tokens is { LastRequestUtc: { } at, CacheTtl: { } ttl } ? at + ttl - DateTime.UtcNow : null;
+
+    /// <summary>Only while the user holds the next move. A working session refreshes its own
+    /// cache on every step, and an ended one has no next message to price.</summary>
+    private bool CacheClockApplies =>
+        !_closed && _status is SessionStatus.Done or SessionStatus.Waiting
+                            or SessionStatus.Idle or SessionStatus.Error;
+
+    /// <summary>warm, cooling, cold, or "" for no chip. Cooling and cold need a context
+    /// worth protecting; under <see cref="CacheWarnFloor"/> the difference is pennies.</summary>
+    public string CacheWarmLevel
+    {
+        get
+        {
+            if (!CacheClockApplies || CacheRemaining is not { } left || _tokens is not { } t) return "";
+            bool worth = t.ContextNow >= CacheWarnFloor;
+            if (left <= TimeSpan.Zero) return worth ? "cold" : "";
+            return left <= CacheCoolingWindow && worth ? "cooling" : "warm";
+        }
+    }
+
+    public bool HasCacheWarm => CacheWarmLevel.Length > 0;
+
+    /// <summary>The last five minutes: the whole row pulses yellow (0.11.22). A yellow number
+    /// alone read as just another chip on 14-10-2026 ("does the 2 mean two minutes?").</summary>
+    private static readonly TimeSpan CacheUrgentWindow = TimeSpan.FromMinutes(5);
+
+    public bool CacheUrgent => CacheWarmLevel == "cooling" && CacheRemaining is { } left &&
+                               left <= CacheUrgentWindow;
+
+    /// <summary>The cache has expired on a context worth protecting: the row takes a steady
+    /// light-blue tint (0.11.23), so a glance says the cheap window is gone.</summary>
+    public bool CacheCold => CacheWarmLevel == "cold";
+
+    public string CacheWarmText => CacheWarmLevel switch
+    {
+        "" => "",
+        "cold" => "❄" + Compact(_tokens!.ContextNow),
+        "cooling" => "♨ cools in " + MinutesLeft(CacheRemaining!.Value),
+        _ => "♨" + MinutesLeft(CacheRemaining!.Value),
+    };
+
+    public string CacheWarmTip
+    {
+        get
+        {
+            if (CacheWarmLevel is not { Length: > 0 } level || _tokens is not { } t ||
+                CacheRemaining is not { } left) return "";
+            string ttl = t.CacheTtl!.Value.TotalMinutes >= 60 ? "1-hour" : "5-minute";
+            string size = Compact(t.ContextNow);
+            string head = level == "cold"
+                ? $"Prompt cache expired {MinutesLeft(-left)} ago. The next message writes the whole " +
+                  $"{size} context into the cache again, at the full write price."
+                : $"Prompt cache warm for another {MinutesLeft(left)} ({ttl} cache). Replying before " +
+                  $"then re-reads the {size} context at the cache-read price; after it, the whole " +
+                  "context is written again, 20x the price or more.";
+            string holds = "";
+            return head + Environment.NewLine +
+                   "The timer restarts on every request this session sends. A model switch, an " +
+                   "effort change or a compaction rewrites the cache anyway." + holds;
+        }
+    }
+
+    private static string MinutesLeft(TimeSpan span) =>
+        span.TotalMinutes < 1 ? "<1m"
+        : span.TotalHours >= 2 ? $"{(int)span.TotalHours}h"
+        : $"{(int)span.TotalMinutes}m";
+
+    private string _cacheWarmShown = "";
+
+    /// <summary>Called on the metadata tick: time passes without any input changing, so the
+    /// chip is re-raised whenever what it would show has moved.</summary>
+    public void RefreshCacheWarmth()
+    {
+        string now = CacheWarmLevel + "|" + CacheWarmText + "|" + CacheUrgent;
+        if (now == _cacheWarmShown) return;
+        RaiseCacheWarmth();
+    }
+
+    private void RaiseCacheWarmth()
+    {
+        _cacheWarmShown = CacheWarmLevel + "|" + CacheWarmText + "|" + CacheUrgent;
+        Raise(nameof(CacheUrgent));
+        Raise(nameof(CacheCold));
+        Raise(nameof(CacheWarmLevel));
+        Raise(nameof(HasCacheWarm));
+        Raise(nameof(CacheWarmText));
+        Raise(nameof(CacheWarmTip));
     }
 
     /// <summary>Token counts at card width: 52, 6.1k, 614k, 10.1M. Three significant figures
@@ -1040,10 +1262,30 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IBlinkable
                // what the card would otherwise say about it is a report on one of two halves.
                : ForkedProcesses ? "2 processes · forked"
                : _status == SessionStatus.Replaced && _openAsTab ? "replaced · close its tab"
+               : BoardWaiting ? (_boardOpen == 1 ? "1 question for you" : $"{_boardOpen} questions for you")
+               : BoardEmpty ? "board empty"
                : WaitingOnWaves ? (_dispatchedRuns > 1 ? $"{_dispatchedRuns} runs dispatched" : "run dispatched")
                : WaitingOnWatch ? (ActiveWatches > 1 ? $"watching, {ActiveWatches} monitors" : "watching")
                : WaitingOnJob ? (ActiveJobs > 1 ? $"{ActiveJobs} jobs running" : "job running")
+               : UpdatedByPeer ? "answered another session"
                : SessionStatusNames.ToDisplay(_status);
+
+    /// <summary>The state <see cref="StatusDisplay"/> shows in place of the status, as a key and
+    /// its count, for the phone page, which words it in the phone's own language. Null when the
+    /// card shows the status itself. Same states and same precedence as StatusDisplay (keep the
+    /// two in step), minus the two that never reach the phone: a closed card and a replaced one.
+    /// Without it the phone showed every board and every machine wait as an ordinary `done`,
+    /// i.e. "your turn", on a card the deck shows as not asking for the user (20-10-2026).</summary>
+    public (string Key, int Count)? Overlay =>
+        Closed ? null
+               : ForkedProcesses ? ("forked", 0)
+               : BoardWaiting ? ("board_open", _boardOpen ?? 0)
+               : BoardEmpty ? ("board_empty", 0)
+               : WaitingOnWaves ? ("runs", _dispatchedRuns)
+               : WaitingOnWatch ? ("watch", ActiveWatches)
+               : WaitingOnJob ? ("job", ActiveJobs)
+               : UpdatedByPeer ? ("peer", 0)
+               : null;
 
     /// <summary>The turn really has ended, but what it is waiting for is a machine, not the user.
     /// Silencing the blink was not enough (seen on a session that had dispatched a headless run
@@ -1081,7 +1323,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IBlinkable
     /// and watches so purple keeps meaning one thing only. Deliberately not an entry in
     /// StatusStyles: the status IS `done`, and a configurable colour for a derived
     /// presentation state would let the two drift.</summary>
-    private const string MachineWaitBorderColor = "#FF7FB8D8";
+    private const string MachineWaitBorderColor = "#7FB8D8";
 
     /// <summary>The colour of a forked card. Not in StatusStyles for the same reason as the one
     /// above — the status underneath is whatever the last process to speak said it was — and
@@ -1090,7 +1332,18 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IBlinkable
     /// thing. It outranks the machine-wait colour in <see cref="BorderBrush"/>, because the
     /// wall is scanned by colour and this is the only state where the card's own words may be
     /// describing half a conversation.</summary>
-    private const string ForkedBorderColor = "#FFE0544A";
+    private const string ForkedBorderColor = "#E0544A";
+
+    /// <summary>The two board colours (see <see cref="BoardOpen"/>). Not in StatusStyles for the
+    /// same reason as the machine-wait colour: the status underneath is `done`. Pink, because it
+    /// is the one colour no status uses, so "questions are waiting on the board" cannot be
+    /// mistaken for any other card asking; slate for the empty board, calm and steady.</summary>
+    private const string BoardWaitingBorderColor = "#FF5FB0";
+    private const string BoardEmptyBorderColor = "#6E7F8F";
+
+    /// <summary>The colour of <see cref="UpdatedByPeer"/>: quiet like an empty board, and its own
+    /// so the two can still be told apart.</summary>
+    private const string PeerTurnBorderColor = "#7FA38F";
 
     private string ClosedLabel => "closed" + (_endReason is { Length: > 0 } r ? $" ({r})" : "");
 
@@ -1105,6 +1358,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IBlinkable
         get
         {
             if (_closed) return false;
+            // An empty board ends its turn with nothing for the user (see BoardOpen). A board
+            // with questions falls through and blinks like any `done`, until acknowledged.
+            if (BoardEmpty) return false;
+            // A turn another session started, in a window with a board (see UpdatedByPeer).
+            if (UpdatedByPeer) return false;
             // A session that dispatched headless runs ends its turn for real, so it goes
             // `done` and blinks like a session waiting for an answer — the one thing it is
             // not (a long-running management session looked like it wanted the user while
@@ -1136,7 +1394,13 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IBlinkable
         {
             if (_closed) return MakeBrush("#555555");
             if (ForkedProcesses) return MakeBrush(ForkedBorderColor);
+            if (BoardEmpty) return MakeBrush(BoardEmptyBorderColor);
+            if (BoardWaiting)
+                return MakeBrush(BlinkActive && _altPhase
+                    ? ResolveStyle(SessionStatus.Done).AltColor ?? "black"
+                    : BoardWaitingBorderColor);
             if (WaitingOnMachine) return MakeBrush(MachineWaitBorderColor);
+            if (UpdatedByPeer) return MakeBrush(PeerTurnBorderColor);
             var style = ResolveStyle(_status);
             string color = BlinkActive && _altPhase ? style.AltColor ?? "black" : style.Color;
             return MakeBrush(color);
@@ -1162,6 +1426,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IBlinkable
         Raise(nameof(BorderBrush));
         Raise(nameof(Closed));
         Raise(nameof(TooltipText));
+        RaiseCacheWarmth();
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;

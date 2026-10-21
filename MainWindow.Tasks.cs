@@ -17,6 +17,9 @@ namespace TabTower;
 public partial class MainWindow
 {
     private TasksFileWatcher? _tasksWatcher;
+    /// <summary>When the file was last applied, for the phone page: a navigation it asked for
+    /// has landed once this moves.</summary>
+    private DateTime _tasksLoadedAt = DateTime.Now;
 
     /// <summary>(Re)apply the configured path: tear down the old watcher, reset all task
     /// state, and start watching the new file. null/empty turns the feature off.
@@ -41,6 +44,7 @@ public partial class MainWindow
     private void OnTasksLoaded(TasksLoadResult result)
     {
         Vm.TasksPanel.Apply(result);
+        _tasksLoadedAt = DateTime.Now;
         RefreshWorkspaceTaskLinks();
         if (result.FileError is { } err)
         {
@@ -355,9 +359,9 @@ public partial class MainWindow
     /// <summary>The session group the keys held right now ask for, on the card this task
     /// would open in. Null on every card that has no session groups, which is usually all of
     /// them but one.</summary>
-    private SessionGroupConfig? GroupForTask(TaskItemViewModel task)
+    private SessionGroupConfig? GroupForTask(TaskItemViewModel task, string? held = null)
         => task.HasWorkspace && Vm.FindByPath(task.WorkspacePath) is { } ws
-               ? GroupForModifiers(ws) : null;
+               ? GroupForModifiers(ws, held) : null;
 
     /// <summary>Where a NEW session for this task opens: the folder, and the group in it.
     ///
@@ -370,20 +374,24 @@ public partial class MainWindow
     /// in that group's folder whatever folder the task names: the instances behind the groups
     /// are where the user wants task work done, and the session reaches the task's own folder
     /// from there. Shift is the way back to the task's own folder, on its plain group if it has
-    /// one. Off, the keys pick a group only in a folder that has groups, as before.</summary>
+    /// one. Off, the keys pick a group only in a folder that has groups, as before.
+    ///
+    /// <paramref name="held"/> stands in for the keys when the request did not come from this
+    /// keyboard (the phone page sends the modifier its button stands for); null = read the keys.</summary>
     private (string Path, SessionGroupConfig? Group) TaskTarget(TaskItemViewModel task,
-                                                                SessionGroupConfig? typed)
+                                                                SessionGroupConfig? typed,
+                                                                string? held = null)
     {
         string own = task.WorkspacePath;
         if (typed != null) return (typed.WorkspacePath.Length > 0 ? typed.WorkspacePath : own, typed);
-        if (!_tasksFollowGroups) return (own, GroupForTask(task));
-        string held = HeldModifierName();
+        held = held != null ? NormalizeModifier(held) : HeldModifierName();
+        if (!_tasksFollowGroups) return (own, GroupForTask(task, held));
         if (held == "shift")
             return (own, task.HasWorkspace && Vm.FindByPath(own) is { } ws
                              ? GroupsFor(ws).FirstOrDefault(g => NormalizeModifier(g.Modifier).Length == 0)
                              : null);
         var group = _sessionGroups.FirstOrDefault(g => g.Id.Length > 0 && NormalizeModifier(g.Modifier) == held);
-        if (group == null) return (own, GroupForTask(task));
+        if (group == null) return (own, GroupForTask(task, held));
         return (group.WorkspacePath.Length > 0 ? group.WorkspacePath : own, group);
     }
 
@@ -403,7 +411,7 @@ public partial class MainWindow
                 LogService.Info("tasks", $"task {task.Id} opens in \"{ws.DisplayTitle}\"" +
                                          (group != null ? $" ({group.Id})" : "") +
                                          $", not its own folder \"{task.WorkspacePath}\"");
-            NewSessionInVscode(ws, prompt, group);
+            var (sent, why) = NewSessionInVscode(ws, prompt, group);
             return;
         }
         // A group's instance is started by its own launcher, never by a plain VSCode launch,
@@ -413,17 +421,14 @@ public partial class MainWindow
         {
             SetStatus($"\"{task.Name}\", {group?.Name ?? path}: that folder has no card on the deck, nothing opened");
             LogService.Info("tasks", $"task {task.Id} not opened: \"{path}\" has no card");
-            return;
         }
-        if (!Directory.Exists(task.WorkspacePath))
-        {
+        else if (!Directory.Exists(task.WorkspacePath))
             SetStatus($"\"{task.Name}\": the workspace folder does not exist ({task.WorkspacePath})");
-            return;
-        }
-        if (WindowActions.LaunchVsCode(task.WorkspacePath))
+        else if (WindowActions.LaunchVsCode(task.WorkspacePath))
         {
             _pendingOpens[WorkspaceMetadata.NormalizePath(task.WorkspacePath)] = (null, prompt, null, DateTime.Now);
             SetStatus($"Launching VS Code for \"{task.Name}\"; a new session will open once the connector is up");
+            return;
         }
         else
             SetStatus($"\"{task.Name}\": launching VS Code failed");

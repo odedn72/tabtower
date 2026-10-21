@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Test harness for rebuilding cards from Claude Code's live-session registry at startup. It
+       compiles the app's own sources (linked, not copied), so the reader and the rules under test
+       are exactly the code that ships, without starting the app. See tests/session-recovery.tests.ps1. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>RecoveryHarness</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\..\Services\RegistryRecovery.cs" Link="RegistryRecovery.cs" />
+    <Compile Include="..\..\..\Services\SessionRegistry.cs" Link="SessionRegistry.cs" />
+    <!-- SessionRegistry.Probe classifies through RegistryState, which lives here. -->
+    <Compile Include="..\..\..\Services\CloseTabRoute.cs" Link="CloseTabRoute.cs" />
+  </ItemGroup>
+
+</Project>

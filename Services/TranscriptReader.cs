@@ -104,8 +104,8 @@ public sealed record TranscriptInfo(
 /// one base input token of the model that produced it. Deliberately a token count and not
 /// money: those ratios are identical on Opus 5 ($5/$25 per MTok), Sonnet 5 ($2/$10), Haiku 4.5
 /// ($1/$5) and Fable 5 ($10/$50), so one weight table covers every model with no price list,
-/// and a session that mixes models still sums correctly. The one exception is the Fable/Mythos
-/// 5.1 cache read at 0.025x, applied per request.
+/// and a session that mixes models still sums correctly. The exceptions are cache reads priced
+/// below 0.1x: Fable/Mythos 5.1 at 0.025x and Opus 5.5 at 0.05x, applied per request.
 ///
 /// What it does NOT include: a subagent's own spend. An in-process one writes
 /// <c>isSidechain</c> turns into this same file and is counted, but a BACKGROUND agent — the
@@ -114,10 +114,15 @@ public sealed record TranscriptInfo(
 /// <param name="ContextNow">The newest request's whole input footprint: what <c>/context</c>
 /// reports as the window's current occupancy. Every earlier request is history.</param>
 /// <param name="ContextWindow">The model's window, to make ContextNow a percentage.</param>
+/// <param name="LastRequestUtc">When the newest main-thread request STARTED: the prompt cache's
+/// timer runs from the start of the last request that read or wrote it, not from its end.</param>
+/// <param name="CacheTtl">The cache lifetime the newest write used: one hour or five minutes,
+/// whichever TTL the newest cache write was made with. Null when no write has been seen yet.</param>
 public sealed record TokenUsage(
     long Input, long CacheRead, long CacheWrite, long Output,
     long InputWeighted, long CacheReadWeighted, long CacheWriteWeighted, long OutputWeighted,
-    long ContextNow, long ContextWindow, int Requests)
+    long ContextNow, long ContextWindow, int Requests,
+    DateTime? LastRequestUtc = null, TimeSpan? CacheTtl = null)
 {
     /// <summary>Everything the API counted, unweighted — the impressive, misleading one.</summary>
     public long Raw => Input + CacheRead + CacheWrite + Output;
@@ -181,6 +186,7 @@ public static class TranscriptReader
             var commands = new List<string>();
             var tail = new Queue<string>(TailLines);
             var tokens = new UsageTally();
+            string? previous = null;
             var workflowRuns = new Dictionary<string, string>(StringComparer.Ordinal);
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             using var reader = new StreamReader(stream);
@@ -189,10 +195,12 @@ public static class TranscriptReader
                 if (line.Length == 0) continue;
                 if (tail.Count == TailLines) tail.Dequeue();
                 tail.Enqueue(line);
+                string? before = previous;
+                previous = line;
                 // Its own check rather than a branch of the chain below: an assistant line can
                 // also contain one of those markers inside its own text, and a request missed
                 // that way would silently under-report the total.
-                if (line.Contains(UsageMarker)) tokens.Add(line);
+                if (line.Contains(UsageMarker)) tokens.Add(line, before);
                 // Its own check for the same reason: the launch rides a user line (the tool_result),
                 // which the chain below may claim first.
                 if (line.Contains(WorkflowMarker)) ReadWorkflowRun(line, workflowRuns);
@@ -316,6 +324,7 @@ public static class TranscriptReader
         private const long ScaleOne = 1000;
         private const long WeightCacheRead = 100;       // 0.1x
         private const long WeightCacheReadFable = 25;   // 0.025x — Fable/Mythos 5.1 only
+        private const long WeightCacheReadOpus55 = 50;  // 0.05x — Opus 5.5 (published list price, Oct 2026: $0.20 cache read on $4 input)
         private const long WeightWrite5m = 1250;        // 1.25x
         private const long WeightWrite1h = 2000;        // 2x
         private const long WeightOutput = 5000;         // 5x, on every current model
@@ -329,8 +338,14 @@ public static class TranscriptReader
         private long _in, _read, _write, _out;
         private long _inW, _readW, _writeW, _outW;
         private long _ctxNow, _ctxWindow;
+        private DateTime? _lastStart;
+        private TimeSpan? _ttl;
 
-        public void Add(string line)
+        /// <param name="previous">The line written just before this one. A request is sent
+        /// right after the line that feeds it (the prompt or the tool_result), so that line's
+        /// timestamp is the request's start; the assistant line itself is only written once the
+        /// first block has been generated, which can be minutes later.</param>
+        public void Add(string line, string? previous = null)
         {
             try
             {
@@ -365,7 +380,9 @@ public static class TranscriptReader
                 _write += write5m + write1h;
                 _out += output;
 
-                long readWeight = IsFableFamily(model) ? WeightCacheReadFable : WeightCacheRead;
+                long readWeight = IsFableFamily(model) ? WeightCacheReadFable
+                    : model.Contains("opus-5-5", StringComparison.OrdinalIgnoreCase) ? WeightCacheReadOpus55
+                    : WeightCacheRead;
                 _inW += input;
                 _readW += read * readWeight / ScaleOne;
                 _writeW += (write5m * WeightWrite5m + write1h * WeightWrite1h) / ScaleOne;
@@ -376,14 +393,45 @@ public static class TranscriptReader
                 _ctxNow = input + read + write5m + write1h;
                 _ctxWindow = model.Contains("haiku", StringComparison.OrdinalIgnoreCase)
                     ? 200_000 : 1_000_000;
+
+                // The cache clock. Only the main thread's requests keep the main thread's cache
+                // warm: an in-process subagent's sidechain turns carry their own prefix.
+                bool sidechain = root.TryGetProperty("isSidechain", out var sc) &&
+                                 sc.ValueKind == JsonValueKind.True;
+                if (!sidechain)
+                {
+                    DateTime? start = StampOf(previous) ?? StampOf(root);
+                    if (start is { } at && (_lastStart is not { } last || at > last)) _lastStart = at;
+                    // A pure read says nothing about the TTL; keep the last write's answer.
+                    if (write1h > 0) _ttl = TimeSpan.FromHours(1);
+                    else if (write5m > 0) _ttl = TimeSpan.FromMinutes(5);
+                }
             }
             catch { }
         }
 
+        private static DateTime? StampOf(string? line)
+        {
+            if (line is null) return null;
+            try
+            {
+                using var doc = JsonDocument.Parse(line);
+                return StampOf(doc.RootElement);
+            }
+            catch { return null; }
+        }
+
+        private static DateTime? StampOf(JsonElement root) =>
+            root.TryGetProperty("timestamp", out var ts) && ts.ValueKind == JsonValueKind.String &&
+            DateTime.TryParse(ts.GetString(), null,
+                System.Globalization.DateTimeStyles.AdjustToUniversal |
+                System.Globalization.DateTimeStyles.AssumeUniversal, out var parsed)
+                ? parsed : null;
+
         public TokenUsage? Result() => _seen.Count == 0
             ? null
             : new TokenUsage(_in, _read, _write, _out, _inW, _readW, _writeW, _outW,
-                             _ctxNow, _ctxWindow, _seen.Count);
+                             _ctxNow, _ctxWindow, _seen.Count, _lastStart, _ttl);
 
         private static bool IsFableFamily(string model) =>
             model.Contains("fable", StringComparison.OrdinalIgnoreCase) ||

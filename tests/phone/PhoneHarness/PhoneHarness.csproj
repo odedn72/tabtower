@@ -19,6 +19,8 @@
     <Compile Include="..\..\..\Services\PermissionWait.cs" Link="PermissionWait.cs" />
     <!-- What `session end` answers when it is asked to close the tab too, apart from the app that gathers its facts. -->
     <Compile Include="..\..\..\Cli\SessionEndReply.cs" Link="SessionEndReply.cs" />
+    <!-- Whether a close-by-id may reveal the session at all (0.11.35), apart from the window that acts on it. -->
+    <Compile Include="..\..\..\Services\CloseTabRoute.cs" Link="CloseTabRoute.cs" />
     <EmbeddedResource Include="..\..\..\Services\Phone\Web\*.*" LogicalName="phone/%(Filename)%(Extension)" WithCulture="false" />
   </ItemGroup>
 

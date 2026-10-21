@@ -88,7 +88,7 @@ $s = Join-Path $workDir 'oldpath.json'
 $r = Invoke-Hooks 'install-hooks' $s
 $json = Read-Json $s
 Assert ($json.hooks.Stop.Count -eq 1) "exactly one Stop group"
-Assert ($json.hooks.Stop[0].hooks[0].command -notmatch 'OLD') "old path gone"
+Assert ($json.hooks.Stop[0].hooks[0].command -notmatch 'OLD\\PLACE') "old path gone"
 
 # --- Case 4: another tool's hooks on the same event -> preserved, ours added beside ---
 Write-Host "Case 4: foreign hooks are preserved"

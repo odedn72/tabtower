@@ -63,6 +63,12 @@ out, every other character and the value's registry type exactly as they were. T
 is duplicated in the two scripts on purpose (each must run alone from the zip) and the suite
 fails when the copies differ. `release.ps1` does not run it yet.
 
+`tests\session-recovery.tests.ps1` (no `-Exe`, nothing of the app is started) covers the
+startup rebuild from Claude Code's live-session registry (`Services/RegistryRecovery.cs`): the
+rules in-process, then a fixture registry over real hidden processes, where only a session whose
+pid is running with its recorded start time, from the VS Code extension's binary, gets a card.
+`release.ps1` does not run it yet.
+
 **These tests passing does not mean the status lifecycle works.** They cover the
 installer only. A card can stay blue, blink wrongly or go quiet while all of them pass:
 see "Debugging status and blink" below.

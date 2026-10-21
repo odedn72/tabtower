@@ -192,6 +192,12 @@ public static class SelfTest
             .Any(s => s.TryGetProperty("link", out var l) && l.ValueKind == JsonValueKind.String &&
                       l.GetString()!.StartsWith("https://claude.ai/code/"));
         Check(anyLink, "sessions with a bridge id carry the Claude app link");
+        var listed = J(r).GetProperty("cards").EnumerateArray().SelectMany(c => c.GetProperty("sessions").EnumerateArray()).ToList();
+        Check(listed.Any(s => s.GetProperty("pinned").GetBoolean() && s.GetProperty("shown").GetString() == "board_empty"),
+              "a pinned empty board carries pinned and shown, so the page can show it as the deck does");
+        Check(listed.Any(s => s.GetProperty("shown").ValueKind == JsonValueKind.String && s.GetProperty("shown").GetString() == "board_open"
+                              && s.GetProperty("count").GetInt32() == 3),
+              "a board with questions carries its count");
 
         r = await server.Handle(Req("GET", "/", headers: new() { ["X-Forwarded-For"] = "100.64.0.99" }));
         Check(r.Status == 403 && Err(r) == "unknown_device", "an address Tailscale does not know is refused");
@@ -350,6 +356,111 @@ public static class SelfTest
         Check(clock.Check(dev).State == PairState.Denied, "denied within the cooldown");
         now += PhonePairing.DenyCooldown + TimeSpan.FromSeconds(1);
         Check(clock.Check(dev).State == PairState.Pending, "can ask again after the cooldown");
+
+        // ---- tasks ----
+        r = await server.Handle(Req("GET", "/api/tasks", headers: Api()));
+        var tv = J(r).GetProperty("tasks");
+        Check(r.Status == 200 && tv.GetProperty("enabled").GetBoolean() && tv.GetProperty("tasks").GetArrayLength() == 2,
+              "tasks: the level on screen is listed");
+        Check(tv.GetProperty("nav").GetArrayLength() == 3 && tv.GetProperty("home").ValueKind == JsonValueKind.Object,
+              "tasks: the top-level squares and the home square come with it");
+        Check(tv.GetProperty("options").GetArrayLength() == 2 && tv.GetProperty("options")[0].GetProperty("key").GetString() == "",
+              "tasks: the windows a session can go to, the plain click first");
+        r = await server.Handle(Req("GET", "/api/tasks/find?id=%23billing", headers: Api()));
+        Check(r.Status == 200 && J(r).GetProperty("task").GetProperty("canStart").GetBoolean(),
+              "tasks: a number from another level is found through the launch index (a leading # tolerated)");
+        r = await server.Handle(Req("GET", "/api/tasks/find?id=9.9.9", headers: Api()));
+        Check(r.Status == 404 && Err(r) == "no_task", "tasks: an unknown number is not found");
+        r = await server.Handle(Req("POST", "/api/tasks/start", headers: Api(), body: "{\"id\":\"billing\",\"option\":\"ctrl\"}"));
+        Check(r.Status == 200 && Guid.TryParse(J(r).GetProperty("sessionId").GetString(), out _),
+              "tasks: a package session starts and returns its session id");
+        Check(J(r).GetProperty("prompt").GetString() == "package session billing",
+              "tasks: ...and hands back the phrase, which VS Code only types into the box");
+        Check(backend.LastTaskPrompt == "package session billing" && backend.LastTaskOption == "ctrl",
+              "tasks: ...with the phrase from the tasks file and the window the page picked");
+        r = await server.Handle(Req("POST", "/api/tasks/start", headers: Api(), body: "{\"id\":\"1.4\",\"option\":\"\",\"fast\":true}"));
+        Check(r.Status == 200 && backend.LastTaskPrompt == "work on task 1.4 --fast", "tasks: the fast variant is asked for by a flag, never by text");
+        r = await server.Handle(Req("POST", "/api/tasks/start", headers: Api(), body: "{\"id\":\"1\",\"option\":\"ctrl; calc\"}"));
+        Check(r.Status == 400, "tasks: a malformed window option is refused");
+        r = await server.Handle(Req("POST", "/api/tasks/start", headers: Api(), body: "{\"id\":\"1\\u0000x\",\"option\":\"\"}"));
+        Check(r.Status == 400, "tasks: a task number with a control character is refused");
+        r = await server.Handle(Req("POST", "/api/tasks/start", headers: Api(), body: "{\"id\":\"1\",\"option\":\"\"}"));
+        Check(r.Status == 409 && Err(r) == "no_workspace", "tasks: a card with no folder cannot start a session");
+        r = await server.Handle(Req("GET", "/api/tasks/start", headers: Api()));
+        Check(r.Status == 404, "tasks: GET on the start route does nothing");
+        r = await server.Handle(Req("POST", "/api/tasks/nav", headers: Api(), body: "{\"kind\":\"url\",\"id\":\"C:\\\\x.vbs\"}"));
+        Check(r.Status == 400, "tasks: navigation names a card, never a link");
+        r = await server.Handle(Req("POST", "/api/tasks/nav", headers: Api(), body: "{\"kind\":\"task\",\"id\":\"nope\"}"));
+        Check(r.Status == 404, "tasks: navigation from a card that is not on screen is refused");
+        long before = tv.GetProperty("loadedAt").GetInt64();
+        r = await server.Handle(Req("POST", "/api/tasks/nav", headers: Api(), body: "{\"kind\":\"nav\",\"id\":\"P\"}"));
+        Check(r.Status == 200, "tasks: navigate to the packages level");
+        JsonElement landed = default;
+        for (int i = 0; i < 20; i++)
+        {
+            await Task.Delay(100);
+            landed = J(await server.Handle(Req("GET", "/api/tasks", headers: Api()))).GetProperty("tasks");
+            if (landed.GetProperty("loadedAt").GetInt64() != before) break;
+        }
+        Check(landed.GetProperty("tasks").EnumerateArray().Any(t => t.GetProperty("id").GetString() == "billing"),
+              "tasks: ...the new level arrives once the file is reloaded");
+        r = await server.Handle(Req("POST", "/api/tasks/nav", headers: Api(), body: "{\"kind\":\"home\"}"));
+        Check(r.Status == 200, "tasks: the home square needs no id");
+        r = await server.Handle(Req("POST", "/api/tasks/nav", headers: Api(), body: "{\"kind\":\"nav\",\"id\":\"X\"}"));
+        Check(r.Status == 409 && Err(r) == "not_allowed" && J(r).GetProperty("detail").GetString() == "outside the tasks folder",
+              "tasks: a link the phone may not run comes back as not_allowed (409), with the reason");
+
+        // ---- which links a phone may run (PhoneLinkPolicy, 0.11.43) ----
+        {
+            string tmp = Path.Combine(Path.GetTempPath(), $"phone-links-{Environment.ProcessId}");
+            string home = Path.Combine(tmp, "tasks");
+            string sub = Path.Combine(home, "sub");
+            string evil = Path.Combine(tmp, "tasks-old");
+            Directory.CreateDirectory(sub);
+            Directory.CreateDirectory(evil);
+            string tasks = Path.Combine(home, "tasks.json");
+            string shim = Path.Combine(home, "switch-1.vbs");
+            string deep = Path.Combine(sub, "switch-hold-x.vbs");
+            string outsideExe = Path.Combine(tmp, "tool.exe");
+            string evilShim = Path.Combine(evil, "switch-1.vbs");
+            foreach (var f in new[] { tasks, shim, deep, outsideExe, evilShim }) File.WriteAllText(f, "x");
+            try
+            {
+                string? W(string link) => PhoneLinkPolicy.Refusal(link, tasks);
+                Check(W(shim) == null, "links: a .vbs beside the tasks file is allowed");
+                Check(W(deep) == null, "links: a file in a folder below the tasks file is allowed");
+                Check(W(sub) == null && W(home) == null, "links: the tasks folder and a folder below it are allowed");
+                Check(W(shim.ToUpperInvariant()) == null, "links: the folder comparison ignores case");
+                Check(W(shim.Replace('\\', '/')) == null, "links: forward slashes resolve to the same allowed file");
+                Check(W(Path.Combine(sub, "..", "switch-1.vbs")) == null, "links: a '..' that stays inside the folder is allowed");
+                Check(W(outsideExe) == "outside the tasks folder", "links: an .exe outside the tasks folder is refused");
+                string sys = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
+                Check(W(sys) == "outside the tasks folder", "links: a system program is refused");
+                Check(W(Path.Combine(home, "..", "tool.exe")) == "outside the tasks folder", "links: a '..' escape is refused");
+                Check(W(home + "\\..\\..\\..\\Windows\\System32\\cmd.exe") == "outside the tasks folder", "links: a deep '..' escape is refused");
+                Check(W(evilShim) == "outside the tasks folder", "links: a sibling folder sharing the name prefix is refused");
+                Check(W(evil) == "outside the tasks folder", "links: ...and the sibling folder itself");
+                Check(W(@"\\server\share\switch-1.vbs") == "network or device path", "links: a UNC share path is refused");
+                Check(W("//server/share/switch-1.vbs") == "network or device path", "links: a UNC path in forward slashes is refused");
+                Check(W(@"\\?\" + shim) == "network or device path", "links: a \\\\?\\ path is refused, even to an allowed file");
+                Check(W(@"\\.\pipe\tabtower") == "network or device path", "links: a \\\\.\\ device path is refused");
+                Check(W("ms-settings:privacy") == "not a local path", "links: a URL scheme is refused");
+                Check(W("file:///" + shim.Replace('\\', '/')) == "not a local path", "links: a file: URL is refused, even to an allowed file");
+                Check(W("https://example.com/") == "not a local path", "links: a web address is refused");
+                Check(W("switch-1.vbs") == "not a local path", "links: a relative path is refused");
+                Check(W(@"\Windows\System32\cmd.exe") == "not a local path", "links: a drive-relative path is refused");
+                Check(W(shim + ":hidden") == "not a local path", "links: an alternate data stream is refused");
+                Check(W(Path.Combine(home, "missing.vbs")) == "does not exist", "links: a file that does not exist is refused");
+                Check(W("") == "empty link" && W(shim.Replace("switch-1.vbs", "")) == null, "links: an empty link is refused");
+                Check(PhoneLinkPolicy.Refusal(shim, null) == "no tasks file", "links: with no tasks file nothing runs");
+                Check(PhoneLinkPolicy.Refusal(shim, @"\\server\share\tasks.json") != null, "links: a tasks file on a share allows nothing");
+                Check(!PhoneLinkPolicy.IsInside(@"C:\a\tasks-old\x", @"C:\a\tasks")
+                      && PhoneLinkPolicy.IsInside(@"C:\a\tasks\x", @"C:\a\tasks\")
+                      && PhoneLinkPolicy.IsInside(@"c:\A\Tasks", @"C:\a\tasks"),
+                      "links: the prefix test needs a separator, and ignores case and a trailing separator");
+            }
+            finally { try { Directory.Delete(tmp, true); } catch { } }
+        }
 
         // ---- string tables ----
         r = await server.Handle(Req("GET", "/i18n?langs=xx-YY,en-US"));
@@ -530,6 +641,56 @@ public static class SelfTest
               "it does not claim the tab is open: the deck did not ask, and says what to do if it is");
         Check(late.Contains("VSCode tab was not asked for") && late.Contains("resume it"),
               "it says the tab was not asked for, and why");
+
+        // ---- whether a close by id may reveal the session (CloseTabRoute, RegistryState) ----
+        // 17-10-2026: closes by id for sessions with no tab of their own revealed them, and the tab
+        // left in front, a live session no request had named, was closed. A session the registry
+        // shows as gone is now a no-op: nothing is sent, so no tab can be touched.
+        {
+            const string ctSid = "aaaaaaaa-0000-4000-8000-000000000001";
+            const string ctOther = "bbbbbbbb-0000-4000-8000-000000000002";
+            static TabTower.Services.RegistryState.Entry E(string id, bool running) => new(id, running);
+            static TabTower.Services.ProcessState R(string id, bool readable, params TabTower.Services.RegistryState.Entry[] entries) =>
+                TabTower.Services.RegistryState.Classify(id, readable, entries).State;
+            var L = TabTower.Services.ProcessState.Live;
+            var G = TabTower.Services.ProcessState.Gone;
+            var U = TabTower.Services.ProcessState.Unknown;
+            Check(R(ctSid, false) == U, "registry: unreadable is Unknown, never Gone");
+            Check(R(ctSid, true) == U, "registry: an empty registry proves nothing (Unknown)");
+            Check(R(ctSid, true, E(ctOther, false)) == U, "registry: only dead entries of other sessions prove nothing (Unknown)");
+            Check(R(ctSid, true, E(ctSid, true)) == L, "registry: its own entry with a running process is Live");
+            Check(R(ctSid, true, E(ctSid, false)) == G, "registry: its own entry whose process exited is Gone");
+            Check(R(ctSid, true, E(ctOther, true)) == G, "registry: in use (another live entry) and nothing running for it is Gone");
+            Check(R(ctSid, true, E(ctSid, false), E(ctSid, true)) == L, "registry: a stale file beside a live one for the same session is Live");
+
+            static (TabTower.Services.CloseTabAction Action, string Why) D(bool replaced, bool closed, TabTower.Services.ProcessState p,
+                                                                           string why, bool conn, bool byId, string ver) =>
+                TabTower.Services.CloseTabRoute.Decide(replaced, closed, p, why, conn, byId, ver);
+            var ById = TabTower.Services.CloseTabAction.ById;
+            var NoOp = TabTower.Services.CloseTabAction.NoOp;
+            var Refuse = TabTower.Services.CloseTabAction.Refuse;
+            Check(D(false, false, L, "", true, true, "0.7.1").Action == ById, "decide: a live session on a capable window is closed by id");
+            Check(D(false, false, U, "x", true, true, "0.7.1").Action == ById, "decide: an unknown registry keeps the by-id path");
+            // The handoff path: a session ending ITSELF with `session end --close-tab` is alive while
+            // it asks (its own process is in the registry beside the window's other sessions), so its
+            // tab must still be closed by id.
+            var selfEnd = TabTower.Services.RegistryState.Classify(ctSid, true, new[] { E(ctOther, true), E(ctSid, true) });
+            Check(selfEnd.State == L && D(false, false, selfEnd.State, selfEnd.Why, true, true, "0.7.1").Action == ById,
+                  "decide: a live session ending itself with --close-tab is still closed by id");
+            var gone = D(false, false, G, "its registered process has exited", true, true, "0.7.1");
+            Check(gone.Action == NoOp, "decide: a session whose process is gone is a no-op, not a reveal");
+            Check(gone.Why.Contains("no tab was touched") && gone.Why.Contains("its registered process has exited"),
+                  "decide: the no-op says nothing was touched, and why");
+            Check(D(false, false, G, "", false, false, "").Action == NoOp, "decide: gone is a no-op even with no connector to ask");
+            Check(D(true, false, L, "", true, true, "0.7.1").Action == Refuse, "decide: a replaced session is refused (the deck closes it by label)");
+            var ended = D(false, true, L, "", true, true, "0.7.1");
+            Check(ended.Action == Refuse && ended.Why.Contains("already ended") && ended.Why.Contains("resume it"),
+                  "decide: an ended session is refused, with the words the live suite matches");
+            Check(D(false, false, L, "", false, false, "").Why == "no VSCode connector for this workspace", "decide: no connector is refused");
+            var old = D(false, false, L, "", true, false, "0.6.15");
+            Check(old.Action == Refuse && old.Why.Contains("0.6.15") && old.Why.Contains("by session id"),
+                  "decide: an extension too old to close by id is refused, naming its version");
+        }
 
         Console.WriteLine($"\n{_passed} passed, {_failed} failed");
         return _failed == 0 ? 0 : 1;

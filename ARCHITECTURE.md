@@ -73,7 +73,7 @@ order:
 inert unless a file path is configured. Keeping it separate is deliberate: it is the one
 feature that can be removed without touching the engine.
 
-`MainWindow.Phone.cs` is the same kind of partial for the phone page (docs/phone-access.md):
+`MainWindow.Phone.cs` is the same kind of partial for the phone page (docs/phone-access.md), its Tasks tab included:
 server lifecycle, the pairing prompt, and the bridge from the HTTP layer to the engine. Every
 backend call hops onto the UI thread and calls the methods the CLI calls (`NewSessionInVscode`,
 `CloseSessionTab` + `EndSession`, `OpenSessionInVscode`). A new session's id comes back through
@@ -93,6 +93,7 @@ backend call hops onto the UI thread and calls the methods the CLI calls (`NewSe
 
 | File | What it owns |
 |---|---|
+| `RegistryRecovery.cs` / `SessionRegistry.cs` | Cards for sessions the deck never heard start (their hooks fired while it was not running). At startup, and again 60s later, `RecoverLiveSessions` reads Claude Code's `sessions/*.json`; a record earns a card only with its identity proven (running pid with the recorded start time, the extension's own binary, a transcript on disk), and a card the deck closed on a guess (orphaned, stale, exited) is reopened. Pure rules testable without the app: `tests/session-recovery.tests.ps1`. |
 | `TranscriptReader.cs` | Single pass over a `.jsonl`: titles, label candidates, and the pending tool call. All the "what is Claude doing" intelligence is here. |
 | `WorkspaceMetadata.cs` | Reads the branch from `.git/HEAD` directly (no git.exe) and the colour from `.vscode/settings.json`. Also the window-title pattern. |
 | `ConfigStore.cs` | Auto-save with a 1s debounce, atomic write (temp + rename). There is no save button. |

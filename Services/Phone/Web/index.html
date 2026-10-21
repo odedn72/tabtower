@@ -12,12 +12,14 @@
     --bg: #f4f5f7; --card: #ffffff; --text: #1b1f24; --muted: #6a737d; --line: #e3e6ea;
     --accent: #2f6fde; --working: #2f6fde; --waiting: #e07b00; --done: #8a5cf6; --idle: #9aa3ad;
     --error: #d23c3c; --wrapped: #1f9d55; --shade: rgba(0, 0, 0, .45);
+    --board: #d63f93; --board-empty: #6e7f8f; --machine: #3f8fb8; --forked: #e0544a; --peer: #5f8f74;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #111418; --card: #1b2027; --text: #e8ebef; --muted: #96a0ab; --line: #2a313a;
       --accent: #6aa0ff; --working: #6aa0ff; --waiting: #ffa53d; --done: #b99cf5; --idle: #6d7680;
       --error: #ff6b6b; --wrapped: #3ccf7f; --shade: rgba(0, 0, 0, .6);
+      --board: #ff5fb0; --board-empty: #6e7f8f; --machine: #7fb8d8; --forked: #e0544a; --peer: #7fa38f;
     }
   }
   * { box-sizing: border-box; }
@@ -60,6 +62,13 @@
   .st-done .dot { background: var(--done); }
   .st-wrapped .dot { background: var(--wrapped); }
   .st-error .dot { background: var(--error); }
+  /* What the deck card shows in place of the status (session.shown), in the deck's own colours.
+     After the st- rules so they win: a board or a machine wait is a `done` underneath. */
+  .sh-board_open .dot { background: var(--board); }
+  .sh-board_empty .dot { background: var(--board-empty); }
+  .sh-runs .dot, .sh-watch .dot, .sh-job .dot { background: var(--machine); }
+  .sh-forked .dot { background: var(--forked); animation: none; }
+  .sh-peer .dot { background: var(--peer); }
   @keyframes pulse { 50% { opacity: .35; } }
   .r-main { flex: 1; min-width: 0; }
   /* up to 3 lines, so a title is readable instead of cut at one line */
@@ -67,6 +76,9 @@
              overflow-wrap: anywhere; text-align: start; }
   .r-meta { color: var(--muted); font-size: 12px; }
   .st-waiting .r-meta { color: var(--waiting); font-weight: 600; }
+  .sh-board_open .r-meta { color: var(--board); font-weight: 600; }
+  .sh-forked .r-meta { color: var(--forked); font-weight: 600; }
+  .pin { font-size: 13px; }
   .is-new .r-meta { color: var(--accent); font-weight: 600; }
   .go { color: var(--accent); font-size: 13px; flex: none; }
   .empty { color: var(--muted); font-size: 14px; padding: 10px 14px; border-top: 1px solid var(--line); }
@@ -88,6 +100,42 @@
   .sheet-text { color: var(--muted); font-size: 15px; overflow-wrap: anywhere; }
   .sheet-actions { display: flex; gap: 10px; margin-top: 16px; }
   .sheet-actions .btn { flex: 1; padding: 12px; font-size: 16px; }
+  /* The hidden attribute wins over every display rule below (.tabs, .fast and the rest are flex). */
+  [hidden] { display: none !important; }
+  /* Two views, sessions and tasks; the tasks tab exists only when the PC has a tasks file. */
+  .tabs { display: flex; gap: 6px; margin-top: 10px; }
+  .tab { flex: 1; appearance: none; border: 1px solid var(--line); background: var(--card); color: var(--text);
+         border-radius: 10px; padding: 8px; font: inherit; font-size: 15px; font-weight: 600; cursor: pointer; }
+  .tab.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .runbox { display: flex; gap: 8px; margin: 12px 0 4px; }
+  .runbox input { flex: 1; min-width: 0; font: inherit; font-size: 16px; padding: 9px 12px; border-radius: 10px;
+                  border: 1px solid var(--line); background: var(--card); color: var(--text); }
+  .navstrip { display: flex; gap: 6px; overflow-x: auto; padding: 8px 0 4px; -webkit-overflow-scrolling: touch; }
+  .navchip { flex: none; appearance: none; border: 2px solid var(--line); background: var(--card); color: var(--text);
+             border-radius: 10px; min-width: 42px; padding: 6px 10px; font: inherit; font-size: 14px; font-weight: 700; cursor: pointer; }
+  .navchip.on { background: var(--accent); color: #fff; }
+  .navchip:disabled { opacity: .5; }
+  .task { padding: 12px 14px; }
+  .t-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+  .t-id { font-weight: 700; color: var(--text); }
+  .t-status { padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); }
+  .t-name { font-weight: 600; font-size: 16px; margin-top: 4px; overflow-wrap: anywhere; text-align: start; }
+  .t-lead { font-size: 14px; margin-top: 4px; overflow-wrap: anywhere; text-align: start; }
+  .t-desc { color: var(--muted); font-size: 13px; margin-top: 4px; white-space: pre-line; overflow-wrap: anywhere; text-align: start;
+            overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; }
+  .t-desc.open { display: block; -webkit-line-clamp: unset; line-clamp: unset; }
+  .t-more { appearance: none; border: 0; background: none; color: var(--accent); font: inherit; font-size: 13px; padding: 4px 0 0; cursor: pointer; }
+  .t-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .t-actions a.btn { text-decoration: none; }
+  .t-sep { color: var(--muted); font-size: 12px; margin: 14px 2px 0; }
+  .options { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+  .options .btn { padding: 12px; font-size: 16px; border-inline-start: 6px solid transparent; text-align: start; }
+  .phrase { margin: 8px 0; padding: 8px 10px; border-radius: 8px; background: var(--bg); color: var(--text);
+            font-weight: 600; overflow-wrap: anywhere; }
+  .toast .t-more { color: inherit; font-weight: 700; text-decoration: underline; }
+  .opt-state { color: var(--muted); font-weight: 400; font-size: 14px; }
+  .fast { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 15px; }
+  .fast input { width: 20px; height: 20px; }
 </style>
 </head>
 <body>
@@ -97,6 +145,10 @@
   <div class="sub" id="stamp"></div>
   <div class="sub" id="summary"></div>
   <div class="chips" id="chips"></div>
+  <div class="tabs" id="tabs" hidden>
+    <button class="tab on" data-tab="sessions" data-i18n="tab_sessions">Sessions</button>
+    <button class="tab" data-tab="tasks" data-i18n="tab_tasks">Tasks</button>
+  </div>
 </header>
 <div id="banner"></div>
 <section class="card pair" id="pair" hidden>
@@ -107,6 +159,17 @@
   <div class="sub" id="pair-wait"></div>
 </section>
 <main id="list"></main>
+<section id="tasks-view" hidden>
+  <form class="runbox" id="runbox">
+    <input id="run-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="go"
+           dir="ltr" data-i18n-placeholder="run_placeholder" data-i18n-title="run_title">
+    <button class="btn" type="submit" data-i18n="run_go" data-i18n-title="run_title">Run</button>
+  </form>
+  <div class="navstrip" id="navstrip"></div>
+  <div class="sub" id="tasks-meta"></div>
+  <div id="tasks-banner"></div>
+  <div id="tasks"></div>
+</section>
 <section class="card" id="closed-card" hidden>
   <div class="card-h"><div class="ws-title" data-i18n="closed_heading">Recently closed</div>
     <button class="btn ghost" id="closed-toggle" data-i18n="show" data-i18n-title="show_title">Show</button></div>
@@ -122,6 +185,18 @@
     <div class="sheet-actions">
       <button class="btn ghost" id="sheet-cancel" data-i18n="cancel" data-i18n-title="cancel_title">Cancel</button>
       <button class="btn" id="sheet-ok"></button>
+    </div>
+  </div>
+</div>
+<div class="sheet" id="launch" hidden role="dialog" aria-modal="true" aria-labelledby="launch-title">
+  <div class="sheet-box">
+    <div class="sheet-title" id="launch-title"></div>
+    <div class="sheet-text" id="launch-text"></div>
+    <label class="fast" id="launch-fast-row" hidden><input type="checkbox" id="launch-fast"><span data-i18n="task_launch_fast">Fast variant</span></label>
+    <div class="sub" id="launch-pick"></div>
+    <div class="options" id="launch-options"></div>
+    <div class="sheet-actions">
+      <button class="btn ghost" id="launch-cancel" data-i18n="cancel" data-i18n-title="cancel_title">Cancel</button>
     </div>
   </div>
 </div>
@@ -153,6 +228,7 @@
     document.title = t('app_title');
     document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n); });
     document.querySelectorAll('[data-i18n-title]').forEach((el) => { el.title = t(el.dataset.i18nTitle); });
+    document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => { el.placeholder = t(el.dataset.i18nPlaceholder); });
     $('stamp').textContent = t('loading');
   }
 
@@ -177,8 +253,18 @@
     document.body.classList.add('toasting');
     clearTimeout(el._h); el._h = setTimeout(hideToast, ms);
   }
-  // Tapping the message (anywhere but its link) dismisses it.
-  $('toast').addEventListener('click', (ev) => { if (!ev.target.closest('a')) hideToast(); });
+  // Tapping the message (anywhere but its link or button) dismisses it. A [data-copy] link or
+  // button copies the session's opening phrase first; the copy starts inside the tap itself,
+  // which is what a phone browser requires, and a link then carries on to the app.
+  $('toast').addEventListener('click', (ev) => {
+    const copy = ev.target.closest('[data-copy]');
+    if (copy && copy.dataset.copy) {
+      try { navigator.clipboard.writeText(copy.dataset.copy).catch(() => { }); } catch { }
+      if (copy.tagName === 'BUTTON') copy.textContent = t('task_copied');
+      return;
+    }
+    if (!ev.target.closest('a')) hideToast();
+  });
 
   function reason(d, status) {
     const code = d && d.error ? d.error : '';
@@ -213,24 +299,39 @@
   let busy = false;
   let lastCards = [];
 
+  // The words the deck card shows: its state over the status when it has one (s.shown, e.g. an
+  // empty question board, or a turn that ended waiting for a machine), else the status.
+  function rowLabel(s, k) {
+    if (s.new) return t('st_new');
+    if (s.shown) return t('sh_' + s.shown + (s.count > 1 ? '_n' : ''), { n: s.count });
+    return t('st_' + k) + (k === 'done' && s.ack ? ' · ' + t('seen') : '');
+  }
+
+  // Which chip a session counts in, as the deck colours it: a board with questions is the
+  // user's turn; an empty board and a wait for a machine are nobody's chip, whatever the
+  // status underneath says. A forked session still counts by its status.
+  const chipKey = (s) => (s.shown === 'board_open' ? 'done' : s.shown && s.shown !== 'forked' ? '' : s.status);
+
   function row(s) {
     const k = statusKey(s.status);
-    const label = s.new ? t('st_new') : t('st_' + k) + (k === 'done' && s.ack ? ' · ' + t('seen') : '');
+    const label = rowLabel(s, k);
+    const pin = s.pinned ? `<span class="pin" title="${esc(t('pinned_title'))}">📌</span> ` : '';
     const inner = `<span class="dot"></span>
-      <span class="r-main"><div class="r-title" dir="auto">${esc(s.title || t('untitled'))}</div>
+      <span class="r-main"><div class="r-title" dir="auto">${pin}${esc(s.title || t('untitled'))}</div>
       <div class="r-meta">${esc(label)}${s.at ? ' · ' + esc(ago(s.at)) : ''}${s.group ? ' · <bdi>' + esc(s.group) + '</bdi>' : ''}</div></span>
       ${s.link ? `<span class="go">${esc(t('open_app'))}</span>` : ''}`;
     const main = s.link
       ? `<a class="row-link" href="${esc(s.link)}" title="${esc(t('open_app_title'))}">${inner}</a>`
       : `<div class="row-link">${inner}</div>`;
-    return `<div class="row st-${k}${s.new ? ' is-new' : ''}">${main}<button class="end" data-close="${esc(s.id)}" data-title="${esc(s.title || '')}"
+    const shown = s.shown && !s.new ? ' sh-' + esc(s.shown) : '';
+    return `<div class="row st-${k}${shown}${s.new ? ' is-new' : ''}">${main}<button class="end" data-close="${esc(s.id)}" data-title="${esc(s.title || '')}"
       title="${esc(t('close_title'))}">${esc(t('close'))}</button></div>`;
   }
 
   function render(d) {
     lastCards = d.cards || [];
     const all = lastCards.flatMap((c) => c.sessions);
-    const count = (k) => all.filter((s) => s.status === k).length;
+    const count = (k) => all.filter((s) => chipKey(s) === k).length;
     $('chips').innerHTML =
       `<span class="chip waiting">${esc(t('chip_waiting'))} <b>${count('waiting')}</b></span>
        <span class="chip">${esc(t('chip_working'))} <b>${count('working')}</b></span>
@@ -239,8 +340,11 @@
     $('summary').textContent = t('summary', { sessions: all.length, cards: lastCards.length });
 
     const html = lastCards.map((c, i) => {
-      // Newest activity first, the same order as the Claude app's own session list.
-      const ss = [...c.sessions].sort((a, b) => (b.at || 0) - (a.at || 0));
+      // Pinned sessions first, as on the deck (the server sends them newest pin first and the
+      // sort is stable, so that order holds), then newest activity first, the same order as
+      // the Claude app's own session list.
+      const ss = [...c.sessions].sort((a, b) => ((b.pinned ? 1 : 0) - (a.pinned ? 1 : 0))
+        || (a.pinned ? 0 : (b.at || 0) - (a.at || 0)));
       const many = c.targets.length > 1;
       const buttons = c.targets.length
         ? `<div class="groups">${c.targets.map((g) => g.state === 'ready'
@@ -262,6 +366,7 @@
     $('list').innerHTML = ''; $('chips').innerHTML = ''; $('summary').textContent = ''; $('stamp').textContent = '';
     $('closed-card').hidden = true;
     $('pair').hidden = false;
+    $('tabs').hidden = true; $('tasks-view').hidden = true;
     if (d.error === 'denied') {
       $('pair-title').textContent = t('denied_title');
       $('pair-text').textContent = t('denied_text');
@@ -292,7 +397,9 @@
         return;
       }
       $('pair').hidden = true;
-      $('closed-card').hidden = false;
+      $('closed-card').hidden = tab !== 'sessions';
+      // A device approved while this page waited: the tasks tab was never asked about yet.
+      if (!tasksKnown) loadTasks();
       $('banner').innerHTML = '';
       render(d);
     } catch (e) {
@@ -415,11 +522,223 @@
     } finally { busy = false; load(); loadClosed(); }
   });
 
+  // ---- tasks: the PC's tasks page, the same level and the same squares ----
+  // The phone keeps no view of its own. A square or a card's link is followed ON THE PC, the
+  // producer rewrites the tasks file, and both screens show the new level; loadedAt moving is
+  // the sign it has landed.
+  let tab = 'sessions';
+  let lastTasks = null;
+  let navBusy = false;
+  let tasksKnown = false;
+
+  function showTab(name) {
+    tab = name === 'tasks' && !$('tabs').hidden ? 'tasks' : 'sessions';
+    document.querySelectorAll('.tab').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
+    $('list').hidden = tab !== 'sessions';
+    $('closed-card').hidden = tab !== 'sessions' || !$('pair').hidden;
+    $('tasks-view').hidden = tab !== 'tasks';
+    try { localStorage.setItem('tt-tab', tab); } catch { }
+    if (tab === 'tasks') loadTasks();
+  }
+  document.querySelectorAll('.tab').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.tab)));
+
+  function taskCard(task) {
+    const status = task.status ? `<span class="t-status" dir="auto" style="border-color:${esc(task.color)}">${esc(task.status)}</span>` : '';
+    const actions = [];
+    if (task.canStart) actions.push(`<button class="btn" data-start="${esc(task.id)}" title="${esc(t('task_start_title'))}">${esc(t('task_start'))}</button>`);
+    if (task.nav) actions.push(`<button class="btn ghost" data-nav="${esc(task.id)}" title="${esc(t('task_open_title'))}" dir="auto">${esc(task.navLabel || t('task_open'))}</button>`);
+    if (task.link) actions.push(`<a class="btn ghost" href="${esc(task.link)}" target="_blank" rel="noopener">${esc(t('task_link'))}</a>`);
+    return `<section class="card task" data-color="${esc(task.color)}">
+      <div class="t-head"><bdi class="t-id" dir="ltr">${esc(task.id)}</bdi>${status}</div>
+      <div class="t-name" dir="auto">${esc(task.name)}</div>
+      ${task.lead ? `<div class="t-lead" dir="auto">${esc(task.lead)}</div>` : ''}
+      ${task.description ? `<div class="t-desc" dir="auto">${esc(task.description)}</div><button class="t-more" data-more>${esc(t('task_more'))}</button>` : ''}
+      ${actions.length ? `<div class="t-actions">${actions.join('')}</div>` : ''}
+    </section>`;
+  }
+
+  function renderTasks(v) {
+    lastTasks = v;
+    const squares = (v.home ? [{ ...v.home, kind: 'home' }] : []).concat(v.nav.map((n) => ({ ...n, kind: 'nav' })));
+    $('navstrip').innerHTML = squares.map((n) => `<button class="navchip${n.active ? ' on' : ''}" data-kind="${n.kind}" data-id="${esc(n.number)}"
+        data-color="${esc(n.color)}" title="${esc(n.name + (n.detail ? ' · ' + n.detail : ''))}" dir="auto">${esc(n.label)}</button>`).join('');
+    $('navstrip').querySelectorAll('.navchip').forEach((el) => { el.style.borderColor = el.dataset.color || ''; });
+    $('navstrip').hidden = squares.length === 0;
+    // The square of the level on screen may sit past the edge of a long row.
+    const on = $('navstrip').querySelector('.navchip.on');
+    if (on) {
+      const box = $('navstrip').getBoundingClientRect(), chip = on.getBoundingClientRect();
+      // Centre it, only when it is not fully visible; scrollLeft grows rightwards in both directions.
+      if (chip.left < box.left || chip.right > box.right)
+        $('navstrip').scrollLeft += (chip.left + chip.width / 2) - (box.left + box.width / 2);
+    }
+    $('tasks-meta').textContent = v.generated ? t('tasks_meta', { generated: v.generated }) : '';
+    $('tasks-banner').innerHTML = v.error ? `<div class="banner err" dir="auto">${esc(v.error)}</div>` : '';
+    const pinned = v.tasks.filter((x) => x.pinned), rest = v.tasks.filter((x) => !x.pinned);
+    $('tasks').innerHTML = pinned.map(taskCard).join('')
+      + (pinned.length && rest.length ? `<div class="t-sep"></div>` : '')
+      + rest.map(taskCard).join('')
+      + (v.tasks.length ? '' : `<div class="banner">${esc(t('tasks_empty'))}</div>`);
+    $('tasks').querySelectorAll('section.card').forEach((el) => { el.style.borderInlineStartColor = el.dataset.color || ''; });
+    // "More" only where the description is really cut.
+    $('tasks').querySelectorAll('.t-desc').forEach((el) => {
+      if (el.scrollHeight <= el.clientHeight + 2) el.nextElementSibling.hidden = true;
+    });
+  }
+
+  async function fetchTasks() {
+    const r = await fetch('/api/tasks', { cache: 'no-store', headers: HDR });
+    const d = await r.json().catch(() => ({}));
+    return { r, d };
+  }
+
+  async function loadTasks() {
+    try {
+      const { r, d } = await fetchTasks();
+      if (r.status === 403) { load(); return; }
+      if (!r.ok || !d.ok) { $('tasks-banner').innerHTML = `<div class="banner err">${esc(reason(d, r.status))}</div>`; return; }
+      tasksKnown = true;
+      $('tabs').hidden = !d.tasks.enabled;
+      $('tasks-view').hidden = tab !== 'tasks' || !d.tasks.enabled;
+      if (!d.tasks.enabled) { if (tab === 'tasks') showTab('sessions'); return; }
+      renderTasks(d.tasks);
+    } catch (e) {
+      $('tasks-banner').innerHTML = `<div class="banner err">${esc(t('err_unreachable', { reason: e.message }))}</div>`;
+    }
+  }
+
+  // Follow a link on the PC, then wait (up to ~10 s) for the tasks file to be rewritten.
+  async function navigate(kind, id, what) {
+    if (navBusy || busy) return;
+    navBusy = true;
+    document.querySelectorAll('.navchip, button[data-nav]').forEach((x) => (x.disabled = true));
+    toast(esc(t('nav_moving', { what })), 12000);
+    const before = lastTasks ? lastTasks.loadedAt : 0;
+    try {
+      const { r, d } = await post('/api/tasks/nav', { kind, id });
+      if (!d.ok) { toast(esc(t('failed', { reason: reason(d, r.status) })), 9000); return; }
+      for (let i = 0; i < 20; i++) {
+        await new Promise((res) => setTimeout(res, 500));
+        const { d: v } = await fetchTasks();
+        if (v.ok && v.tasks.loadedAt !== before) { renderTasks(v.tasks); hideToast(); window.scrollTo(0, 0); return; }
+      }
+      toast(esc(t('nav_slow')), 9000);
+    } catch (e) {
+      toast(esc(t('failed', { reason: e.message })), 9000);
+    } finally {
+      navBusy = false;
+      document.querySelectorAll('.navchip, button[data-nav]').forEach((x) => (x.disabled = false));
+    }
+  }
+
+  $('navstrip').addEventListener('click', (ev) => {
+    const b = ev.target.closest('.navchip');
+    if (b) navigate(b.dataset.kind, b.dataset.id, b.title || b.textContent);
+  });
+
+  $('tasks').addEventListener('click', (ev) => {
+    const more = ev.target.closest('button[data-more]');
+    if (more) {
+      const desc = more.previousElementSibling;
+      desc.classList.toggle('open');
+      more.textContent = t(desc.classList.contains('open') ? 'task_less' : 'task_more');
+      return;
+    }
+    const nav = ev.target.closest('button[data-nav]');
+    if (nav) { navigate('task', nav.dataset.nav, nav.textContent); return; }
+    const start = ev.target.closest('button[data-start]');
+    if (start && lastTasks) {
+      const task = lastTasks.tasks.find((x) => x.id === start.dataset.start);
+      if (task) launchTask(task);
+    }
+  });
+
+  // The window picker: one button per VS Code instance, each the window the same click on the
+  // PC with that key held opens in. Resolves to { option, fast } or null.
+  let launchDone = null;
+  function pickLaunch(task) {
+    const options = lastTasks && lastTasks.options.length ? lastTasks.options : [{ key: '', label: t('task_launch_default'), color: '' }];
+    $('launch-title').textContent = t('task_launch_title');
+    $('launch-text').textContent = t('task_launch_text', { task: task.id + ' · ' + task.name });
+    $('launch-fast-row').hidden = !task.hasFast;
+    $('launch-fast').checked = false;
+    $('launch-pick').textContent = options.length > 1 ? t('task_launch_pick') : '';
+    // A window that is not up says so: picking it starts it first, which takes about a minute.
+    $('launch-options').innerHTML = options.map((o) => `<button class="btn ghost" data-option="${esc(o.key)}" data-color="${esc(o.color)}"
+        ${o.state === 'off' ? 'disabled' : ''} title="${esc(t('task_launch_state_' + (o.state || 'ready') + '_title'))}" dir="auto">${esc(o.label)}${o.state === 'ready' || !o.state ? '' : `<span class="opt-state"> · ${esc(t('task_launch_state_' + o.state))}</span>`}</button>`).join('');
+    $('launch-options').querySelectorAll('button').forEach((el) => { el.style.borderInlineStartColor = el.dataset.color || 'var(--accent)'; });
+    hideToast();
+    $('launch').hidden = false;
+    return new Promise((resolve) => { launchDone = resolve; });
+  }
+  function closeLaunch(answer) {
+    if ($('launch').hidden) return;
+    $('launch').hidden = true;
+    const done = launchDone; launchDone = null;
+    if (done) done(answer);
+  }
+  $('launch-options').addEventListener('click', (ev) => {
+    const b = ev.target.closest('button[data-option]');
+    if (b) closeLaunch({ option: b.dataset.option, fast: !$('launch-fast-row').hidden && $('launch-fast').checked });
+  });
+  $('launch-cancel').addEventListener('click', () => closeLaunch(null));
+  $('launch').addEventListener('click', (ev) => { if (ev.target === $('launch')) closeLaunch(null); });
+  document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') closeLaunch(null); });
+
+  // Open a session from a task. The opening phrase is the tasks file's, on the PC; the phone
+  // sends only the task's number and the window.
+  async function launchTask(task) {
+    if (busy) return;
+    const pick = await pickLaunch(task);
+    if (!pick) return;
+    busy = true;
+    toast(esc(t('toast_opening')), 40000);
+    try {
+      const { r, d } = await post('/api/tasks/start', { id: task.id, option: pick.option, fast: pick.fast });
+      // VS Code types the phrase into the new tab without sending it, so from here the user sends
+      // it from the app: the toast shows it, and its link copies it on the way to the app.
+      const phrase = d.prompt ? `<div class="phrase" dir="auto">${esc(d.prompt)}</div>` : '';
+      if (!d.ok) toast(esc(t('failed', { reason: reason(d, r.status) })), 9000);
+      else if (d.launching) toast(esc(t('toast_launching')), 15000);
+      else if (d.link) toast(`${esc(t(d.prompt ? 'toast_task_new' : 'toast_new_link'))}${phrase}
+          <a href="${esc(d.link)}" data-copy="${esc(d.prompt || '')}">${esc(t(d.prompt ? 'task_copy_open' : 'toast_open_in_app'))}</a>`, 60000);
+      else if (d.prompt) toast(`${esc(t('toast_task_new'))}${phrase}<button class="t-more" data-copy="${esc(d.prompt)}">${esc(t('task_copy'))}</button>`, 60000);
+      else toast(esc(t('toast_new_nolink')), 9000);
+      if (d.ok && d.sessionId && !d.link) watchForLink(d.sessionId);
+    } catch (e) {
+      toast(esc(t('failed', { reason: e.message })), 9000);
+    } finally { busy = false; load(); }
+  }
+
+  // The Run box: a task number from anywhere in the tree, as on the PC's toolbar.
+  $('runbox').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const typed = $('run-input').value.trim().replace(/^#/, '');
+    if (!typed) { toast(esc(t('run_empty')), 4000); return; }
+    try {
+      const r = await fetch('/api/tasks/find?id=' + encodeURIComponent(typed), { cache: 'no-store', headers: HDR });
+      const d = await r.json().catch(() => ({}));
+      if (!d.ok) { toast(esc(t('failed', { reason: reason(d, r.status) })), 9000); return; }
+      if (!d.task.canStart) { toast(esc(t('failed', { reason: t('err_no_workspace') })), 9000); return; }
+      $('run-input').blur();
+      await launchTask(d.task);
+      $('run-input').value = '';
+    } catch (e) {
+      toast(esc(t('failed', { reason: e.message })), 9000);
+    }
+  });
+
   // A full reload, not just a data fetch: it also brings a newer version of this page.
   $('refresh').addEventListener('click', () => location.reload());
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
-  setInterval(() => { if (!document.hidden && $('pair').hidden && $('sheet').hidden) load(); }, 15000);
-  loadStrings().then(load);
+  const idle = () => !document.hidden && $('pair').hidden && $('sheet').hidden && $('launch').hidden;
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { load(); if (tab === 'tasks') loadTasks(); } });
+  setInterval(() => { if (idle()) { load(); if (tab === 'tasks' && !navBusy) loadTasks(); } }, 15000);
+  loadStrings().then(load).then(async () => {
+    await loadTasks();
+    let saved = 'sessions';
+    try { saved = localStorage.getItem('tt-tab') || 'sessions'; } catch { }
+    showTab(saved);
+  });
 </script>
 </body>
 </html>

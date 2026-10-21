@@ -4,14 +4,20 @@ TabTower can serve a small page for your phone that shows your Claude Code sessi
 the deck groups them, and lets you act on them from anywhere on your tailnet:
 
 - see every open session with its status (working, needs you, your turn, idle, error) and
-  how long ago it was last active,
+  how long ago it was last active, worded and coloured as the deck card shows it: a question
+  board says how many questions wait for you (or that none do), a session waiting for a run or
+  a monitor of its own says so instead of "your turn", so does a turn that only answered another
+  session in a window with a question board, and pinned sessions come first, marked 📌,
+
 - open a new session in one of your VS Code windows (it asks first, because it starts work
   on your PC),
 - close a session together with its VS Code tab (it asks first),
 - reopen a recently closed session with its whole conversation (no question: closing it
   again undoes it),
 - jump straight into a session in the Claude app, when Claude Code has published a Remote
-  Control link for it.
+  Control link for it,
+- when a tasks file is configured, work the tasks page from the phone too (see
+  [The Tasks tab](#the-tasks-tab)).
 
 The page follows the phone's language: English by default, and any other language TabTower
 has a string table for (Hebrew is included, shown right to left).
@@ -82,6 +88,42 @@ last used. **Revoke** removes it at once; its next visit starts a new pairing.
 If a phone is lost, revoke it here, and also remove it from your tailnet in the Tailscale
 admin console.
 
+## The Tasks tab
+
+When TabTower has a tasks file (⚙ → Tasks file), the page gets a second tab, **Tasks**, that
+shows what the tasks page on the PC shows:
+
+- the cards of the level on screen, pinned ones first, with their status colours,
+- the top-level navigation squares (and the home square, when the file has one) as a row of
+  buttons; the square of the level on screen is highlighted,
+- **▶ Session** on every card that names a folder: it asks which VS Code window to use (one
+  button per session group, the same window a click on the PC with that key held would use,
+  plain click first) and, when the task has one, offers its fast variant,
+- the card's own link button: a drill-in link (a script, a file in the tasks file's own
+  folder) is followed **on the PC**, and a web address opens on the phone,
+- a **Run** box that opens a session for a task by its number, from anywhere in the file's
+  launch index, like the toolbar's Run box.
+
+The phone keeps no view of its own. Following a link runs it on the PC exactly as a click there
+would, the producer rewrites the tasks file, and the page shows the new level once TabTower has
+reloaded it. The tasks page on the PC moves with it.
+
+What the phone can and cannot ask for:
+
+- A session opened from a task always starts with the task's launch phrase from the tasks file
+  (`sessionPrompt` / `newSessionPrompt`, or the fast variant). The phone sends the task's
+  number, the window and the fast flag, never any text of its own.
+- The phrase is typed into the new tab's input box on the PC and **not sent**, exactly as on the
+  PC, where you review it and press Enter. From the phone the page shows the phrase and offers
+  **Copy it and open in the app**: the phrase goes to the clipboard and the session opens in the
+  Claude app, where you paste and send it.
+- A link is followed only when the card or square that carries it is on the current level of
+  the file. The phone names the card; the link itself is read from the file on the PC, so the
+  page cannot make the PC open anything the file did not already offer.
+- A link is followed only when it is a file or folder inside the tasks file's own folder, or
+  below it. Anything else is refused and the page says so (see
+  [What an approved phone can make the PC do](#what-an-approved-phone-can-make-the-pc-do)).
+
 ## How it is protected
 
 Every request goes through these checks before anything else happens:
@@ -119,6 +161,46 @@ most 32 connections at a time and answers any more with "busy".
 
 Only sessions the page lists can be closed from it: an id for a session it does not show
 (one that already ended, a headless run, a replaced session) is refused.
+
+### What an approved phone can make the PC do
+
+With a tasks file configured, an approved device can do two things on the PC that go beyond
+looking at sessions. Weigh them before you approve a device:
+
+- **Start sessions.** It can open a new Claude Code session for any task in the file's launch
+  index, in any of your session-group windows, and that can start a VS Code instance that is not
+  running. The session always starts with the task's own launch phrase from the file, and the
+  phrase is typed into the new tab, not sent: nothing runs until you, or the phone through the
+  Claude app, send it.
+- **Run the file's links on the PC.** Following a card's link runs that link on the PC as a
+  double-click there would (Windows' shell "open"), but only when the link is a file or folder
+  that exists inside the tasks file's own folder, or a folder below it. The link must also
+  already be in the tasks file, on a card or square of the level on screen, and the phone can
+  only name the card, never send a link of its own.
+
+How TabTower decides, for a link that is not an `http://` or `https://` address:
+
+1. It must be a full local path with a drive letter, such as `D:\work\tasks\next.vbs`.
+   A network share (`\\server\share\...`), a device path (`\\?\...`, `\\.\...`), a relative
+   path, an alternate data stream or any `something:` link (`file:`, `ms-settings:`, a custom
+   app link) is refused.
+2. The path is made canonical first (Windows' `GetFullPath`), so a `..` that climbs out of the
+   folder is caught after it is resolved, not before.
+3. The result must be the tasks file's folder or sit below it. The comparison ignores case and
+   needs a folder separator after the folder name, so a sibling folder such as `tasks-old`
+   does not count as inside `tasks`.
+4. The file or folder must exist.
+
+A refused link answers `not_allowed` to the phone, which shows that the link opens on the PC
+only, and the deck log gets one line naming the card and the reason. A click on the PC still
+opens any link, as before. If your tasks file lives on a network share, no link runs from the
+phone.
+
+This does not cover a script placed in the tasks folder itself: it runs from the phone like
+any other file there. Treat write access to that folder like write access to the tasks file,
+and if your file is written by a tool that takes text from elsewhere (issue titles, web pages,
+other people), make sure that tool never turns such text into a file in that folder, or leave
+Phone access off.
 
 ### Caveats
 

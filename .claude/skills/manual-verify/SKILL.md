@@ -1,6 +1,6 @@
 ---
 name: manual-verify
-description: The manual verification checklist for TabTower — the behaviour automation can't reach (live thumbnails, hook-driven statuses, blink and auto-acknowledge, the Reserved Zone, notifications, the tasks panel). Trigger before a release, after touching status/blink/zone/notification code, or when asked to verify or smoke-test the app.
+description: The manual verification checklist for TabTower, covering the behaviour automation can't reach (live thumbnails, hook-driven statuses, blink and auto-acknowledge, the Reserved Zone, notifications, the tasks panel). Trigger before a release, after touching status/blink/zone/notification code, or when asked to verify or smoke-test the app.
 ---
 
 # Manual verification
@@ -10,22 +10,22 @@ needs a human looking at the screen. Run the sections that the change actually t
 run all of them before a release.
 
 **Running it:** `bin\Debug\net10.0-windows\TabTower.exe` (or F5 from Visual Studio).
-Remember the deploy order — `quit`, build, start (see `CLAUDE.md`).
+Remember the deploy order: `quit`, build, start (see `CLAUDE.md`).
 **CLI:** `TabTower.exe <command>` from that folder; `help` lists everything.
 **Config:** `%APPDATA%\TabTower\config.json`. **Log:** `%APPDATA%\TabTower\logs`.
 
-## 1. Workspace cards — adding and binding
+## 1. Workspace cards: adding and binding
 
 - [ ] "+ Add workspace" → pick a folder → a card named after the folder.
 - [ ] A VSCode window already open on that workspace binds immediately (live thumbnail).
-- [ ] `TabTower.exe add "D:\path"` — same behaviour from the CLI.
+- [ ] `TabTower.exe add "D:\path"`: same behaviour from the CLI.
 - [ ] Adding the same folder twice is blocked with a message.
 - [ ] A git project shows its branch (⎇); switching branch updates within ~10s (instantly with the extension).
 - [ ] A Peacock project (`.vscode/settings.json`) takes the Peacock colour on border and title.
 - [ ] Closing the VSCode window keeps the card ("No VSCode window open"); reopening re-binds.
 - [ ] Dragging a VSCode window onto the deck creates/binds a card; a non-VSCode window is blocked.
 
-## 2. Session cards — statuses from the hooks
+## 2. Session cards: statuses from the hooks
 
 Install the hooks per `hooks/README.md`, then open a Claude Code session:
 
@@ -54,19 +54,19 @@ Install the hooks per `hooks/README.md`, then open a Claude Code session:
 - [ ] Zone "Right half" docks and shrinks the work area; "Off" releases it.
 - [ ] "Left/Right quarter" takes a quarter width; a maximized window stays out.
 - [ ] Custom zone: "Custom left…" opens the size dialog; `2/7` ≈ 28.6%, `40%` and `0.4` work, invalid input disables OK, Cancel restores the previous choice, clicking the active item reopens the dialog, and the size survives a restart.
-- [ ] The zone dropdown has **no full-screen entry**, and `100%` / `1.0` / `1/1` in the size dialog is rejected (OK stays disabled). 90% is the widest accepted. Why: a zone that leaves its monitor no work area pins explorer.exe at 100–430% of a core.
-- [ ] **Whole-monitor deck** (what replaced the full-screen zone): zone off + maximize + 📌 on, then restart — it comes back maximized and pinned on the same monitor.
-- [ ] **The shell stays quiet while zoned.** Sample `explorer.exe` once a second (`Win32_PerfRawData_PerfProc_Process`, diff `PageFaultsPersec` with the UInt32 wrap) through off / half / quarter / custom-90%: under 10,000 faults/sec and 20% of a core throughout. Measuring TabTower itself proves nothing — it stays at 1–3% while the shell burns.
+- [ ] The zone dropdown has **no full-screen entry**, and `100%` / `1.0` / `1/1` in the size dialog is rejected (OK stays disabled). 90% is the widest accepted. Why: a zone that leaves its monitor no work area pins explorer.exe at 100-430% of a core.
+- [ ] **Whole-monitor deck** (what replaced the full-screen zone): zone off + maximize + 📌 on, then restart; it comes back maximized and pinned on the same monitor.
+- [ ] **The shell stays quiet while zoned.** Sample `explorer.exe` once a second (`Win32_PerfRawData_PerfProc_Process`, diff `PageFaultsPersec` with the UInt32 wrap) through off / half / quarter / custom-90%: under 10,000 faults/sec and 20% of a core throughout. Measuring TabTower itself proves nothing: it stays at 1-3% while the shell burns.
 - [ ] Zone lock: while active, no title-bar drag, no frame resize (the cursor doesn't change), no double-click maximize, no Win+Shift+Arrow. Minimize/restore work and return exactly to the zone. Turning the zone off restores normal drag/resize.
 - [ ] Stage: monitor + full/half affect where ▶ lands (Stage full-screen is unrelated to the zone and still exists).
 
 ## 5. Persistence and startup
 
-- [ ] Close and reopen — workspaces, sessions (closed ones too), statuses and acknowledgements all return.
+- [ ] Close and reopen: workspaces, sessions (closed ones too), statuses and acknowledgements all return.
 - [ ] `config.json` is readable; a `StatusStyles` colour change is picked up after a restart.
 - [ ] "Start with Windows" creates/removes `HKCU\...\Run\TabTower`.
 - [ ] After installing to a new folder, the Run value points at the new exe.
-- [ ] `tabtower quit` closes cleanly **and the work area returns to full size** — check with an active zone by maximizing a window afterwards.
+- [ ] `tabtower quit` closes cleanly **and the work area returns to full size**; check with an active zone by maximizing a window afterwards.
 
 ## 6. The VSCode extension (TabTower Connector)
 
@@ -97,14 +97,14 @@ TabTower.exe session close-tab --id <the first id>
 ```
 
 - [ ] Both new tabs read "Claude Code" (an unprompted session keeps the label VSCode gave it).
-- [ ] **The right tab closes** — the one whose id was named, not the other, not the active one.
+- [ ] **The right tab closes**: the one whose id was named, not the other, not the active one.
 - [ ] **The second tab stays open and alive**: clicking its card reveals it, nothing was resumed.
 - [ ] The window's previously active tab is active again afterwards.
 - [ ] Output → "TabTower" logs `closeSession <id> by id` then `closed "Claude Code"`.
 - [ ] Repeat with the target's OWN tab active first: it still closes, and the log shows the
       extra step onto a neighbouring tab that makes the reveal observable.
 - [ ] `session close-tab --id` of a session whose tab was already closed by hand: the log says
-      the reveal RESUMED it into a new tab and that the tab was closed again — and no card in
+      the reveal RESUMED it into a new tab and that the tab was closed again, and no card in
       the deck is left working. (It is the one branch that cannot be reached by inspection.)
 - [ ] `session end --id <id> --close-tab` does both, and a plain `session end` touches no tab.
 - [ ] A window still on 0.6.15 refuses with "cannot close a tab by session id", and the log
@@ -112,7 +112,7 @@ TabTower.exe session close-tab --id <the first id>
 
 ## 7. Blink and auto-acknowledge
 
-The subtlest area — most historical bugs live here.
+The subtlest area: most historical bugs live here.
 
 - [ ] A session blinking green → switch to its tab directly in VSCode → the blink stops within ~1s.
 - [ ] Tab already active and window focused when the session finishes → no blink starts at all.
@@ -147,7 +147,7 @@ Conditions: "Windows notifications" ticked in ⚙, **and** 📌 off, **and** Zon
 - [ ] Several at once → the balloon names the most severe + "and N more"; the dot takes the most severe colour (error > waiting > done).
 - [ ] No stuck tray icon after acknowledging everything or closing the app.
 - [ ] Turning the switch off clears everything immediately and persists (`WindowsNotifications: false`); turning it back on restores the badge **without** a balloon for already-orange sessions.
-- [ ] Handling a blinking session **directly in VSCode** withdraws the blink, the dot, the tray icon and the notification itself — including its entry in the Windows notification center.
+- [ ] Handling a blinking session **directly in VSCode** withdraws the blink, the dot, the tray icon and the notification itself, including its entry in the Windows notification center.
 - [ ] Two sessions, one handled → the notification and dot **stay** (one is still waiting); only when both are handled does everything clear.
 
 ## 10. The tasks panel (external JSON)
@@ -155,7 +155,7 @@ Conditions: "Windows notifications" ticked in ⚙, **and** 📌 off, **and** Zon
 Turn it on: ⚙ → "Tasks file (JSON)..." → pick a file. The contract is behind that dialog's
 "📋 Copy spec" button. Empty = fully off.
 
-- [ ] **Opt-in:** with no path configured there is no UI change at all — no strip, no 🗒 on cards.
+- [ ] **Opt-in:** with no path configured there is no UI change at all: no strip, no 🗒 on cards.
 - [ ] A valid file → a collapsed strip on the right: a coloured square per task, pinned ones first with a white border and a separator; hover shows name/status/description.
 - [ ] Editing the file while running updates the strip within ~1s (debounce + retry on a locked file).
 - [ ] Broken JSON / deleted file / wrong version → ⚠ with the reason on the strip and an error state instead of the list on the page. Fixing the file restores it.
@@ -173,17 +173,17 @@ Turn it on: ⚙ → "Tasks file (JSON)..." → pick a file. The contract is behi
 The UI chrome is English and LTR. This section is about **external data**, which is often
 Hebrew and must follow its own language:
 
-- [ ] Hebrew workspace, session and task names render RTL and right-aligned; English ones LTR and left-aligned — on the same screen, in cards, tooltips, the tasks page and menus.
+- [ ] Hebrew workspace, session and task names render RTL and right-aligned; English ones LTR and left-aligned, on the same screen, in cards, tooltips, the tasks page and menus.
 - [ ] Typing Hebrew into the search box, a card title or a toggle name flips that field to RTL as you type.
 - [ ] Paths, ids, colours and zone sizes stay LTR regardless of what surrounds them.
 
 ## Known limits (not bugs)
 
-- An inactive VSCode tab has no thumbnail — a hard platform limit.
+- An inactive VSCode tab has no thumbnail: a hard platform limit.
 - A minimized window freezes its thumbnail on the last frame; being covered is fine.
 - The 📑 tag on a single session card is best-effort, by comparing tab label to title.
 - `claude-vscode.editor.open` is an internal Claude Code command; if it disappears the
   extension falls back to a terminal with `claude --resume`.
 
-*`TabTower.exe snapshot <path>.png` renders the UI to a PNG (without thumbnails) —
+*`TabTower.exe snapshot <path>.png` renders the UI to a PNG (without thumbnails),
 useful for remote debugging.*

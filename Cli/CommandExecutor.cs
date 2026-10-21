@@ -19,7 +19,7 @@ public sealed class CommandExecutor
         "id", "workspace", "state", "path",
         "detail", "transcript", "source", "mode", "reason", "debug", "file", "agents", "entrypoint",
         "prompt", "page", "view", "dispatcher", "group", "config-dir", "after", "tasks", "pid",
-        "workflow", "workflows",
+        "workflow", "workflows", "open",
     };
 
     private readonly MainWindow _window;
@@ -215,6 +215,28 @@ public sealed class CommandExecutor
                 }
                 if (!a.Flags.Contains("launched")) return Err("session agents requires --launched or --workflow <task_id>");
                 var (msg, ok) = _window.NoteAgentLaunched(id, HookInfoFrom(a));
+                return ok ? Ok(msg) : Err(msg);
+            }
+            // Status-neutral for the same reason as `agents`: a board session reports its count
+            // mid-turn, and the Stop that follows is read against it.
+            case "board":
+            {
+                if (!a.Options.TryGetValue("id", out var id)) return Err("session board requires --id <session_id>");
+                int? open = null;
+                if (!a.Flags.Contains("off"))
+                {
+                    if (!int.TryParse(a.Options.GetValueOrDefault("open"), out int n) || n < 0)
+                        return Err("session board requires --open <n> (0 or more) or --off");
+                    open = n;
+                }
+                var (msg, ok) = _window.SetSessionBoard(id, open);
+                return ok ? Ok(msg) : Err(msg);
+            }
+            // Status-neutral: only the row's place in its window moves.
+            case "pin":
+            {
+                if (!a.Options.TryGetValue("id", out var id)) return Err("session pin requires --id <session_id>");
+                var (msg, ok) = _window.SetSessionPinned(id, !a.Flags.Contains("off"));
                 return ok ? Ok(msg) : Err(msg);
             }
             case "end":

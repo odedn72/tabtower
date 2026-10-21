@@ -507,6 +507,8 @@ if ((Test-Path $flag) -and ((Get-Content $flag -Raw).Trim() -eq '0')) { exit 0 }
   good, and it is the one state a hook cannot overwrite: the `Stop` hook of the very turn
   that set it arrives a second later and would otherwise undo it. Anything that shows real
   activity (`working` / `waiting` / `error`), or a `SessionStart` on the same id, clears it.
+  One `working` does not count as activity: a background task's `<task-notification>` wakeup,
+  which arrives as a `UserPromptSubmit` that nobody typed.
 - `replaced` state (steady white, v0.9.61): **no hook drives it either**, and none CAN: it marks
   a session whose process was killed after it handed its work to a successor (a relay script
   does this: it opens a new tab, waits for the new session to be alive, then kills the caller).

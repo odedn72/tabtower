@@ -16,8 +16,8 @@
                     <Setter Property="Visibility" Value="Collapsed"/>
                 </DataTrigger>
                 <!-- A group card sizes to its own content instead of stretching to the row.
-                     Every other card fills that height with its DWM thumbnail; a group card has
-                     none, and its sessions panel is docked to the BOTTOM, so stretching left a
+                     Every other card fills that height with its DWM thumbnail; a group card's
+                     band is a fixed 170px or nothing, and its sessions panel is docked to the BOTTOM, so stretching left a
                      tall empty gap ABOVE the sessions - worse than the long card the split was
                      meant to fix. Top-aligned, the group cards are each exactly as tall
                      as they need to be, and the empty one is a header and a button. -->
@@ -241,6 +241,12 @@
                         <Border BorderBrush="{Binding BorderBrush}" BorderThickness="2" CornerRadius="5"
                                 Margin="0,3" Padding="8,4" Cursor="Hand"
                                 MouseLeftButtonUp="Session_MouseUp">
+                            <!-- Right-click: pin the row to the top of its window's block. -->
+                            <Border.ContextMenu>
+                                <ContextMenu>
+                                    <MenuItem Header="{Binding PinMenuHeader}" Click="PinSession_Click"/>
+                                </ContextMenu>
+                            </Border.ContextMenu>
                             <Border.Style>
                                 <Style TargetType="Border">
                                     <Setter Property="Background" Value="#FF262626"/>
@@ -270,6 +276,51 @@
                                     <ColumnDefinition Width="*"/>
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
+                                <!-- The prompt cache is about to expire (last 5 minutes): the whole
+                                     row pulses yellow behind its text. An overlay rather than an
+                                     animated Background, because a style's brush is frozen and
+                                     cannot be animated. Yellow, never orange: orange is the
+                                     waiting status. -->
+                                <Border Grid.ColumnSpan="2" Margin="-8,-4" CornerRadius="3"
+                                        Background="#FFE8D04A" IsHitTestVisible="False" Opacity="0">
+                                    <Border.Style>
+                                        <Style TargetType="Border">
+                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding CacheUrgent}" Value="True">
+                                                    <Setter Property="Visibility" Value="Visible"/>
+                                                    <DataTrigger.EnterActions>
+                                                        <BeginStoryboard Name="CacheUrgentPulse">
+                                                            <Storyboard>
+                                                                <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                                                                 From="0.12" To="0.5" Duration="0:0:0.9"
+                                                                                 AutoReverse="True" RepeatBehavior="Forever"/>
+                                                            </Storyboard>
+                                                        </BeginStoryboard>
+                                                    </DataTrigger.EnterActions>
+                                                    <DataTrigger.ExitActions>
+                                                        <StopStoryboard BeginStoryboardName="CacheUrgentPulse"/>
+                                                    </DataTrigger.ExitActions>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Border.Style>
+                                </Border>
+                                <!-- The cache has expired: a steady light-blue tint, no pulse. The
+                                     moment has passed, so there is nothing left to hurry for. -->
+                                <Border Grid.ColumnSpan="2" Margin="-8,-4" CornerRadius="3"
+                                        Background="#FF8EC9F0" Opacity="0.2" IsHitTestVisible="False">
+                                    <Border.Style>
+                                        <Style TargetType="Border">
+                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding CacheCold}" Value="True">
+                                                    <Setter Property="Visibility" Value="Visible"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Border.Style>
+                                </Border>
                                 <StackPanel>
                                     <!-- primary: the VSCode tab title; wraps instead of truncating -->
                                     <TextBlock Text="{Binding DisplayTitle}" Foreground="White" FontSize="{Binding DataContext.TasksPanel.FontScale, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource FontScale}, ConverterParameter=12}"
@@ -294,6 +345,39 @@
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"
                                             Margin="8,0,0,0">
+                                    <!-- Pinned to the top of its window's block. Hidden otherwise. -->
+                                    <TextBlock Text="📌" Foreground="#FFBBBBBB" FontSize="{Binding DataContext.TasksPanel.FontScale, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource FontScale}, ConverterParameter=11}" Margin="0,0,6,0"
+                                               ToolTip="Pinned: always the first row of its window. Right-click the row to unpin.">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsPinned}" Value="False">
+                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                    <!-- A board session (it holds the other sessions' questions
+                                         for the user): pink with the count while questions wait,
+                                         grey alone while the board is empty. Hidden on every
+                                         other session. -->
+                                    <TextBlock Text="{Binding BoardText}" FontSize="{Binding DataContext.TasksPanel.FontScale, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource FontScale}, ConverterParameter=11}" Margin="0,0,6,0"
+                                               ToolTip="{Binding BoardTip}">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Foreground" Value="#FFBBBBBB"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsBoard}" Value="False">
+                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding HasBoardQuestions}" Value="True">
+                                                        <Setter Property="Foreground" Value="#FFFF5FB0"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
                                     <TextBlock Text="📑" FontSize="{Binding DataContext.TasksPanel.FontScale, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource FontScale}, ConverterParameter=11}" Margin="0,0,6,0"
                                                ToolTip="Open as a tab in VS Code">
                                         <TextBlock.Style>
@@ -421,6 +505,32 @@
                                             </Style>
                                         </TextBlock.Style>
                                     </TextBlock>
+                                    <!-- The prompt cache clock: minutes left before replying gets
+                                         expensive, counted from the last request's start. Shown
+                                         only while the user holds the next move. Muted while
+                                         warm, yellow in the last 15 minutes (never orange, which
+                                         belongs to the waiting status), and a muted ❄ with the
+                                         context size once it has expired. -->
+                                    <TextBlock Text="{Binding CacheWarmText}" FontSize="{Binding DataContext.TasksPanel.FontScale, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource FontScale}, ConverterParameter=11}" Margin="0,0,6,0"
+                                               ToolTip="{Binding CacheWarmTip}">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Foreground" Value="#FF8FA8C0"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding HasCacheWarm}" Value="False">
+                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding CacheWarmLevel}" Value="cooling">
+                                                        <Setter Property="Foreground" Value="#FFE8D04A"/>
+                                                        <Setter Property="FontWeight" Value="SemiBold"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding CacheWarmLevel}" Value="cold">
+                                                        <Setter Property="Foreground" Value="#FF7F8A96"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
                                     <!-- The window this session runs in is named ONCE, by the
                                          heading above its block, not on every row: with the rows
                                          grouped it would be the same word repeated down the card.
@@ -458,10 +568,10 @@
             </StackPanel>
 
             <!-- Live DWM thumbnail of the bound VSCode window.
-                 Collapsed on a group card: a split card's group cards exist precisely because
-                 the single card was too tall, and their parent binds no window anyway (each
-                 instance typically sets a custom window.title, so BuildTitlePattern's
-                 "<name> - Visual Studio Code" matches none of them). A copy of the
+                 A group card shows the window of its own group (MainWindow.SyncGroupCardWindows,
+                 found by the group's title marker, since a custom window.title per instance
+                 matches no title pattern). A group card WITHOUT a window collapses the band:
+                 the group cards exist because the single card was too tall, and a copy of the
                  "no window" placeholder per group card would cost 170px each to say nothing. -->
             <Grid>
                 <Grid.Style>
@@ -483,11 +593,15 @@
                                 <Setter Property="Visibility" Value="Visible"/>
                                 <Setter Property="Height" Value="Auto"/>
                             </MultiDataTrigger>
-                            <!-- Last, so a group card is collapsed either way. -->
-                            <DataTrigger Binding="{Binding IsGroupCard}" Value="True">
+                            <!-- Last, so a group card with no window is collapsed either way. -->
+                            <MultiDataTrigger>
+                                <MultiDataTrigger.Conditions>
+                                    <Condition Binding="{Binding IsGroupCard}" Value="True"/>
+                                    <Condition Binding="{Binding State}" Value="Disconnected"/>
+                                </MultiDataTrigger.Conditions>
                                 <Setter Property="Visibility" Value="Collapsed"/>
                                 <Setter Property="Height" Value="0"/>
-                            </DataTrigger>
+                            </MultiDataTrigger>
                         </Style.Triggers>
                     </Style>
                 </Grid.Style>

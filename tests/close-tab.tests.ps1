@@ -82,9 +82,18 @@ try {
     Check 'refused on a 0.6.15 window' ($r.Code -ne 0 -and $r.Out -match '0\.6\.15' -and $r.Out -match 'by session id') "[$($r.Code)] $($r.Out)"
     Check 'nothing was pushed to the old window' ((Read-Pushed 1200) -eq '')
 
-    Write-Host "Case 2: a 0.6.16 window is asked, by id"
+    # The fake ids have no process, so where Claude Code's live-session registry is in use (any
+    # Claude Code session running on this machine) the deck must refuse them without sending
+    # anything (0.11.35): a reveal of a session with no process is what closed a stranger's tab
+    # on 17-10-2026. Where the registry cannot answer, the by-id path stands and is checked.
+    $live = @(Get-ChildItem (Join-Path $env:USERPROFILE '.claude\sessions') -Filter *.json -ErrorAction SilentlyContinue).Count -gt 0
+    Write-Host "Case 2: a 0.6.16 window is asked, by id (registry in use: $live)"
     Send-Sync '0.6.16'
     $r = Deck @('session', 'close-tab', '--id', $idA)
+    if ($live) {
+        Check 'a session with no running process is refused, and it says no tab was touched' ($r.Code -ne 0 -and $r.Out -match 'not running' -and $r.Out -match 'no tab was touched') "[$($r.Code)] $($r.Out)"
+        Check 'nothing was pushed for a session with no process' ((Read-Pushed 1200) -eq '')
+    } else {
     Check 'accepted' ($r.Code -eq 0 -and $r.Out -match 'close the tab of session') "[$($r.Code)] $($r.Out)"
     $pushed = Read-Pushed 2500
     $cmd = if ($pushed) { $pushed.Split("`n")[0] | ConvertFrom-Json } else { $null }
@@ -95,13 +104,19 @@ try {
         Check 'ById is set' ($cmd.ById -eq $true) "$($cmd.ById)"
         Check 'the labels ride along' ($cmd.Labels -contains 'Claude Code') ($cmd.Labels -join '|')
     }
+    }
 
     Write-Host "Case 3: session end --close-tab asks for the tab as well"
     $r = Deck @('session', 'end', '--id', $idB, '--close-tab')
+    if ($live) {
+        Check 'the session ends, and no tab is touched for a session with no process' ($r.Code -eq 0 -and $r.Out -match 'ended' -and $r.Out -match 'no tab was touched') "[$($r.Code)] $($r.Out)"
+        Check 'nothing was pushed for it' ((Read-Pushed 1200) -eq '')
+    } else {
     Check 'end reports both halves' ($r.Code -eq 0 -and $r.Out -match 'ended' -and $r.Out -match 'closing its VSCode tab') "[$($r.Code)] $($r.Out)"
     $pushed = Read-Pushed 2500
     $cmd = if ($pushed) { $pushed.Split("`n")[0] | ConvertFrom-Json } else { $null }
     Check 'the tab of the ENDED session was asked for' ($null -ne $cmd -and $cmd.SessionId -eq $idB -and $cmd.ById -eq $true) "got: $pushed"
+    }
 
     Write-Host "Case 4: a plain session end still touches no tab"
     Deck @('session', 'start', '--id', $idC, '--workspace', $ws, '--title', 'Claude Code') | Out-Null

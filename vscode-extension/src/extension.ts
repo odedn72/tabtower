@@ -17,11 +17,14 @@
 // it reveals by session id and closes what the reveal put in front — see closeClaudeTabById.
 // "newSession" with AfterSessionId / NoFocus (v0.6.14) opens the tab next to a live session's
 // tab and hands the window's previously active tab back — see openNewSessionQuietly.
+// Commands run ONE AT A TIME (v0.7.1): each of them moves and then reads the window's active tab,
+// so two side by side read each other's moves as their own — see serialQueue.ts.
 
 import * as vscode from 'vscode';
 import * as net from 'net';
 import * as fs from 'fs';
 import * as path from 'path';
+import { SerialQueue } from './serialQueue';
 
 const PIPE_PATH = '\\\\.\\pipe\\tabtower';
 const RECONNECT_MS = 5000;
@@ -38,6 +41,10 @@ let socket: net.Socket | undefined;
 let connected = false;
 let reconnectTimer: NodeJS.Timeout | undefined;
 let syncTimer: NodeJS.Timeout | undefined;
+// Every command from TabTower goes through this, in arrival order. The pipe can deliver a burst
+// (a script closing nine sessions sent nine closeSession lines in under a second) and each
+// command awaits reveals and hand-backs that a second command running alongside would disturb.
+const commands = new SerialQueue((e) => out.appendLine(`command failed: ${e}`));
 let gitApi: any;
 const hookedRepos = new WeakSet<object>();
 
@@ -558,7 +565,10 @@ function connect(): void {
             const line = buffer.slice(0, idx).trim();
             buffer = buffer.slice(idx + 1);
             if (line) {
-                void handleCommand(line);
+                if (commands.size > 0) {
+                    out.appendLine(`command queued behind ${commands.size} running or waiting`);
+                }
+                void commands.enqueue(() => handleCommand(line));
             }
         }
     });

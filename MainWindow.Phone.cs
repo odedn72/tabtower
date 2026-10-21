@@ -1,6 +1,8 @@
+using System.Diagnostics;
 using System.IO;
 using System.Net.Sockets;
 using System.Windows;
+using System.Windows.Media;
 using TabTower.Models;
 using TabTower.Services;
 using TabTower.Services.Phone;
@@ -168,7 +170,12 @@ public partial class MainWindow
             .Where(s => IsListedOnPhone(s, live))
             .Select(s => new PhoneSession(s.SessionId, s.DisplayTitle, SessionStatusNames.ToName(s.Status),
                                           s.Acknowledged, s.GroupLabel, UnixMs(s.LastEventAt ?? s.StartedAt))
-                         { New = s.Phantom })
+                         {
+                             New = s.Phantom,
+                             Pinned = s.IsPinned,
+                             Shown = s.Overlay?.Key,
+                             Count = s.Overlay?.Count ?? 0,
+                         })
             .ToList();
         var targets = PhoneTargets(view, owner, windowOpen);
         if (sessions.Count == 0 && !targets.Any(t => t.State == "ready")) return;
@@ -242,6 +249,82 @@ public partial class MainWindow
     private void NotifySessionCreated(WorkspaceViewModel ws, SessionViewModel session)
         => SessionCreated?.Invoke(ws, session);
 
+    // ---- the tasks page, as the phone page sees it ----
+
+    /// <summary>The tasks page as it stands on the PC: the same level, in the same order (pinned
+    /// first, then file order), with the same top-level squares. The phone does not keep a view
+    /// of its own: a navigation it asks for runs the producer's link here, so both screens move
+    /// together, exactly as a click on the PC would move them.</summary>
+    private PhoneTasksView BuildPhoneTasks()
+    {
+        var panel = Vm.TasksPanel;
+        if (!panel.Enabled)
+            return new PhoneTasksView(false, null, "", 0, Array.Empty<PhoneTask>(), Array.Empty<PhoneNav>(), null,
+                                      Array.Empty<PhoneLaunchOption>(), 0);
+        // The deck words its stamp in English ("updated 21:03 16.10"); the phone page wants the
+        // time alone and says "updated" in its own language.
+        string generated = panel.GeneratedText.StartsWith("updated ", StringComparison.Ordinal)
+            ? panel.GeneratedText["updated ".Length..] : panel.GeneratedText;
+        return new PhoneTasksView(true, panel.HasError ? panel.ErrorText : null, generated,
+            UnixMs(_tasksLoadedAt), panel.AllTasks.Select(ToPhoneTask).ToList(),
+            panel.NavRoots.Select(n => ToPhoneNav(n, n.Selected)).ToList(),
+            panel.NavHome is { } home ? ToPhoneNav(home, false) : null,
+            PhoneLaunchOptions(), panel.LaunchTargetCount);
+    }
+
+    private PhoneTask ToPhoneTask(TaskItemViewModel t)
+    {
+        bool web = IsWebLink(t.Url);
+        return new PhoneTask(t.Id, t.Name, t.Lead, t.Description, t.Status, BrushHex(t.StatusBrush), t.Pinned,
+                             CanStart: t.HasWorkspace, HasFast: FastTemplateFor(t) != null,
+                             Nav: t.HasUrl && !web, NavLabel: t.UrlLabel, Link: t.HasUrl && web ? t.Url : null);
+    }
+
+    private static PhoneNav ToPhoneNav(NavSquareViewModel n, bool active)
+        => new(n.Number, n.Label, n.Name, n.Status, BrushHex(n.StatusBrush), active, n.Detail);
+
+    /// <summary>The windows a task session can be sent to: one per session group, keyed by the
+    /// modifier that picks it on the PC, so a phone button reaches exactly the window the same
+    /// click with that key held would. Shift is left out while TasksFollowGroups is on, because
+    /// there it means "the task's own folder" rather than a window.</summary>
+    private List<PhoneLaunchOption> PhoneLaunchOptions()
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var options = new List<PhoneLaunchOption>();
+        foreach (var g in _sessionGroups.Where(g => g.Id.Length > 0))
+        {
+            string key = NormalizeModifier(g.Modifier);
+            if ((_tasksFollowGroups && key == "shift") || !seen.Add(key)) continue;
+            options.Add(new PhoneLaunchOption(key, g.Name.Length > 0 ? g.Name : g.Id, g.Color, LaunchState(g)));
+        }
+        // The plain click first: it is the window a task opens in when nothing is held.
+        return options.OrderBy(o => o.Key.Length == 0 ? 0 : 1).ToList();
+    }
+
+    /// <summary>Is this group's window up, can the deck start it, or neither (GroupStateText's
+    /// three answers, as the page needs them).</summary>
+    private string LaunchState(SessionGroupConfig g)
+    {
+        var ws = g.WorkspacePath.Length > 0 ? Vm.FindByPath(g.WorkspacePath) : null;
+        if (ws != null && ConnectorInGroup(ws, g) != null) return "ready";
+        if (GroupWindowIsOpen(g) || (g.Launcher.Length > 0 && File.Exists(g.Launcher))) return "launch";
+        return "off";
+    }
+
+    /// <summary>A web address opens on the phone itself; anything else (a script, a file, an app
+    /// link) is the PC's to open.</summary>
+    private static bool IsWebLink(string url)
+        => url.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+           url.StartsWith("http://", StringComparison.OrdinalIgnoreCase);
+
+    private static string BrushHex(Brush brush)
+        => brush is SolidColorBrush s ? $"#{s.Color.R:X2}{s.Color.G:X2}{s.Color.B:X2}" : "";
+
+    /// <summary>What a request to open a session resolved to, on the UI thread: either an answer
+    /// already (<c>Early</c>), or the card to open it in, its group and the opening phrase.</summary>
+    private readonly record struct PhoneOpenPlan(PhoneNewResult? Early, WorkspaceViewModel? Owner,
+                                                 SessionGroupConfig? Group, string? Prompt);
+
     /// <summary>The engine behind the phone page. Every call runs on the UI thread.</summary>
     private sealed class PhoneDeckBackend : IPhoneBackend
     {
@@ -258,26 +341,71 @@ public partial class MainWindow
         public async Task<IReadOnlyList<PhoneClosedSession>> ListClosedAsync()
             => await _w.Dispatcher.InvokeAsync(_w.BuildPhoneClosed);
 
-        public async Task<PhoneNewResult> NewSessionAsync(string cardKey, string group, CancellationToken ct)
+        public Task<PhoneNewResult> NewSessionAsync(string cardKey, string group, CancellationToken ct)
+            => OpenWatchedAsync(() =>
+            {
+                var parts = cardKey.Split(':');
+                if (parts.Length < 2 || !int.TryParse(parts[1], out int id) || _w.Vm.FindById(id) is not { } owner)
+                    return Fail("not_found");
+                var view = parts.Length > 2
+                    ? owner.GroupCards.FirstOrDefault(c => string.Equals(c.GroupId, parts[2], StringComparison.OrdinalIgnoreCase))
+                    : owner;
+                if (view == null) return Fail("not_found");
+                // Only what the page was offered may be asked for: the same rules, re-checked now.
+                var target = _w.PhoneTargets(view, owner, new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase))
+                    .FirstOrDefault(t => string.Equals(t.Group, group, StringComparison.OrdinalIgnoreCase));
+                if (target == null) return Fail("no_window");
+                SessionGroupConfig? g = group.Length > 0 ? _w.GroupById(group) : null;
+                if (group.Length > 0 && g == null) return Fail("no_window");
+                return new PhoneOpenPlan(null, owner, g, null);
+            }, ct);
+
+        /// <summary>A session from a task: the task's own phrase, in the folder and window the PC
+        /// would pick for a click with <paramref name="option"/> held (TaskTarget). A task whose
+        /// folder has no card is opened the way the PC opens it, by launching VS Code there.</summary>
+        public async Task<PhoneNewResult> StartTaskAsync(string number, string option, bool fast, CancellationToken ct)
+        {
+            string? phrase = null;
+            var result = await OpenWatchedAsync(() =>
+            {
+                if (_w.Vm.TasksPanel.FindByNumber(number) is not { } task) return Fail("no_task");
+                if (!task.HasWorkspace) return Fail("no_workspace");
+                var (path, group) = _w.TaskTarget(task, null, option);
+                string? prompt = _w.BuildNewSessionPrompt(task, fast && _w.FastTemplateFor(task) != null);
+                phrase = prompt;
+                LogService.Info("phone", $"task {task.Id} \"{task.Name}\" opens in \"{path}\"" +
+                                         (group != null ? $" ({group.Id})" : "") + (fast ? " fast" : ""));
+                if (_w.Vm.FindByPath(path) is { } ws) return new PhoneOpenPlan(null, ws, group, prompt);
+                // The same refusals as the PC's own click (StartTaskNewSession): a group's window is
+                // started by its launcher only, and a folder that is not there cannot be opened.
+                bool own = WorkspaceMetadata.NormalizePath(path) == WorkspaceMetadata.NormalizePath(task.WorkspacePath);
+                if (!own) return Fail("no_window", $"{group?.Name ?? path}: that folder has no card on the deck");
+                if (!Directory.Exists(path)) return Fail("no_workspace", $"the folder does not exist ({path})");
+                if (!WindowActions.LaunchVsCode(path)) return Fail("failed", "launching VS Code failed");
+                _w._pendingOpens[WorkspaceMetadata.NormalizePath(path)] = (null, prompt, null, DateTime.Now);
+                return new PhoneOpenPlan(new PhoneNewResult(true, Launching: true), null, null, null);
+            }, ct);
+            // The extension puts the phrase in the new tab's input box and does not send it (the
+            // user reviews it at the desk), so the phone page needs the text to send it from the app.
+            return result.Ok ? result with { Prompt = phrase } : result;
+        }
+
+        private static PhoneOpenPlan Fail(string error, string? detail = null)
+            => new(new PhoneNewResult(false, error, detail), null, null, null);
+
+        /// <summary>Open a new session and hand back its id: resolve the request on the UI thread,
+        /// watch for the first new session in that folder (and group), and wait for it.</summary>
+        private async Task<PhoneNewResult> OpenWatchedAsync(Func<PhoneOpenPlan> resolve, CancellationToken ct)
         {
             var started = new TaskCompletionSource<PhoneNewResult>(TaskCreationOptions.RunContinuationsAsynchronously);
             Action<WorkspaceViewModel, SessionViewModel>? watch = null;
 
             var immediate = await _w.Dispatcher.InvokeAsync<PhoneNewResult?>(() =>
             {
-                var parts = cardKey.Split(':');
-                if (parts.Length < 2 || !int.TryParse(parts[1], out int id) || _w.Vm.FindById(id) is not { } owner)
-                    return new PhoneNewResult(false, "not_found");
-                var view = parts.Length > 2
-                    ? owner.GroupCards.FirstOrDefault(c => string.Equals(c.GroupId, parts[2], StringComparison.OrdinalIgnoreCase))
-                    : owner;
-                if (view == null) return new PhoneNewResult(false, "not_found");
-                // Only what the page was offered may be asked for: the same rules, re-checked now.
-                var target = _w.PhoneTargets(view, owner, new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase))
-                    .FirstOrDefault(t => string.Equals(t.Group, group, StringComparison.OrdinalIgnoreCase));
-                if (target == null) return new PhoneNewResult(false, "no_window");
-                SessionGroupConfig? g = group.Length > 0 ? _w.GroupById(group) : null;
-                if (group.Length > 0 && g == null) return new PhoneNewResult(false, "no_window");
+                var plan = resolve();
+                if (plan.Early != null) return plan.Early;
+                var owner = plan.Owner!;
+                var g = plan.Group;
 
                 // The first NEW session in this folder from here on is ours. With a group, it must
                 // be in that group (or carry no group stamp at all, for a setup without the hook
@@ -291,7 +419,7 @@ public partial class MainWindow
                         _w._phoneStartedSessions.Add(s.SessionId);
                 };
                 _w.SessionCreated += watch;
-                var (ok, msg) = _w.NewSessionInVscode(owner, null, g, focus: false);
+                var (ok, msg) = _w.NewSessionInVscode(owner, plan.Prompt, g, focus: false);
                 if (ok) return null;
                 _w.SessionCreated -= watch;
                 // Parked for a window that is starting: a success the engine reports as "not sent".
@@ -347,9 +475,50 @@ public partial class MainWindow
                 // In a Claude Code panel, as New opens one, never a `claude --resume` terminal: the
                 // terminal route exists for a session whose window died, and here the user closed it
                 // on purpose in a window that is still up (live report 09-10-2026 17:37: the reopen
-                // came back as a terminal in the purple window, with no tab on the card).
+                // came back as a terminal in that window, with no tab on the card).
                 var (sent, msg) = _w.OpenSessionInVscode(ws, session, allowTerminal: false);
                 return sent ? new PhoneOpResult(true) : new PhoneOpResult(false, "failed", msg);
+            });
+
+        public async Task<PhoneTasksView> ListTasksAsync()
+            => await _w.Dispatcher.InvokeAsync(_w.BuildPhoneTasks);
+
+        public async Task<PhoneTask?> FindTaskAsync(string number)
+            => await _w.Dispatcher.InvokeAsync(() =>
+                _w.Vm.TasksPanel.Enabled && _w.Vm.TasksPanel.FindByNumber(number) is { } t ? _w.ToPhoneTask(t) : null);
+
+        /// <summary>Run a link the tasks file holds, as a click on the PC runs it. The phone names
+        /// the card; the link itself is read here, so the page can never make the PC open
+        /// anything the file did not already offer.</summary>
+        public async Task<PhoneOpResult> NavigateTasksAsync(string kind, string id)
+            => await _w.Dispatcher.InvokeAsync(() =>
+            {
+                var panel = _w.Vm.TasksPanel;
+                string url = kind switch
+                {
+                    "home" => panel.NavHome?.Url ?? "",
+                    "nav" => panel.NavRoots.FirstOrDefault(n => n.Number == id)?.Url ?? "",
+                    _ => panel.AllTasks.FirstOrDefault(t => t.Id == id)?.Url ?? "",
+                };
+                if (url.Length == 0) return new PhoneOpResult(false, "not_found");
+                if (IsWebLink(url)) return new PhoneOpResult(false, "web_link");
+                // A tap on the phone runs only what sits in the tasks file's own folder (0.11.43);
+                // a click on the PC still opens any link. PhoneLinkPolicy holds the rule.
+                if (PhoneLinkPolicy.Refusal(url, _w.Vm.TasksFilePath) is { } why)
+                {
+                    LogService.Info("phone", $"tasks navigate {kind} {id} refused (not_allowed): {why}");
+                    return new PhoneOpResult(false, "not_allowed", why);
+                }
+                LogService.Info("phone", $"tasks navigate {kind} {id}");
+                try
+                {
+                    Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+                    return new PhoneOpResult(true);
+                }
+                catch (Exception ex)
+                {
+                    return new PhoneOpResult(false, "failed", ex.Message);
+                }
             });
     }
 }

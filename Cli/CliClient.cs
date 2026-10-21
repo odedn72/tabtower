@@ -109,6 +109,14 @@ public static class CliClient
                                                    the next Stop replaces it with the snapshot
         tabtower session agents --id <sid> --workflow <task_id>   a Workflow team was just
                                                    launched; its live agents join the 🤖 chip
+        tabtower session board  --id <sid> --open <n> | --off
+                                                   marks a BOARD session (one that holds other
+                                                   sessions' questions for you): when its turn ends
+                                                   the card reads "n questions for you" in pink, or
+                                                   "board empty" in steady slate, instead of purple
+        tabtower session pin    --id <sid> [--off]  pin the session to the top of its window's
+                                                   block (newest pin first), or unpin it; pinning
+                                                   an already pinned session changes nothing
         tabtower session end    --id <sid> [--reason <r>]
         tabtower session open   --id <sid>          focus VSCode + open/resume the session's tab
         tabtower session new    <target> [--prompt "..."] [--group <id>] [--after <sid>] [--no-focus]

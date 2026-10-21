@@ -232,7 +232,7 @@ public partial class WorkspaceCardView : UserControl
     private void Card_MouseUp(object sender, MouseButtonEventArgs e)
     {
         if (e.OriginalSource is DependencyObject d && FindAncestorButton(d) != null) return;
-        if (Vm != null) Owner?.FocusWorkspace(Vm.Owner);
+        if (Vm != null) Owner?.FocusCard(Vm);
     }
 
     private void Session_MouseUp(object sender, MouseButtonEventArgs e)
@@ -242,6 +242,12 @@ public partial class WorkspaceCardView : UserControl
             Owner?.HandleSessionClick(Vm.Owner, session);
             e.Handled = true;
         }
+    }
+
+    private void PinSession_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: SessionViewModel session })
+            Owner?.SetSessionPinned(session.SessionId, !session.IsPinned);
     }
 
     private void Edit_Click(object sender, RoutedEventArgs e)
@@ -295,7 +301,9 @@ public partial class WorkspaceCardView : UserControl
 
     private void CloseWindow_Click(object sender, RoutedEventArgs e)
     {
-        if (Vm != null) Owner?.CloseWorkspaceWindow(Vm.Owner);
+        // A group card closes the window it shows (its own group's), never the parent's bind,
+        // which can be another group's window. The menu item is enabled from this card's state.
+        if (Vm != null) Owner?.CloseWorkspaceWindow(Vm.IsGroupCard ? Vm : Vm.Owner);
     }
 
     private void Remove_Click(object sender, RoutedEventArgs e)

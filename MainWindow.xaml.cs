@@ -118,6 +118,14 @@ public partial class MainWindow : Window
         // Sessions restored from config are already blinking; that is history, not news.
         foreach (var s in Vm.AllSessions())
             if (s.BlinkActive) _notifiedSessions.Add(s.SessionId);
+
+        // Sessions that started or resumed while the deck was not running fired their hooks into
+        // nothing. Rebuild them from Claude Code's own registry once the window is up, and once
+        // more a minute later for a VS Code window that was still restoring its sessions.
+        Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, () => RecoverLiveSessions("startup"));
+        var secondPass = new DispatcherTimer { Interval = RecoverySecondPass };
+        secondPass.Tick += (_, _) => { secondPass.Stop(); RecoverLiveSessions("startup+60s"); };
+        secondPass.Start();
     }
 
     // ---- startup / shutdown ----
@@ -146,6 +154,12 @@ public partial class MainWindow : Window
             _statusStyles[key.ToLowerInvariant()] = style;
         SessionViewModel.ResolveStyle = status =>
             _statusStyles.GetValueOrDefault(SessionStatusNames.ToName(status)) ?? new StatusStyle();
+        // A window is a session group (one VS Code instance); a session with no group stamped
+        // has no window the deck can name, so it never counts as sharing one.
+        SessionViewModel.WindowHasBoard = s => s.GroupId is { Length: > 0 } group &&
+            Vm.Workspaces.SelectMany(w => w.Sessions).Any(o =>
+                !ReferenceEquals(o, s) && !o.Closed && o.IsBoard &&
+                string.Equals(o.GroupId, group, StringComparison.OrdinalIgnoreCase));
 
         Vm.NextWorkspaceId = Math.Max(1, config.NextWorkspaceId);
         Vm.ClosedSessionRetention = Math.Max(0, config.ClosedSessionRetention);
@@ -237,6 +251,10 @@ public partial class MainWindow : Window
                     GroupOrder = _sessionGroups.FindIndex(g => g.Id == sc.GroupId) is >= 0 and var gi
                                  ? gi : int.MaxValue,
                     LastMessageAtUtc = sc.LastMessageAtUtc,
+                    TabHostPid = sc.TabHostPid,
+                    BoardOpen = sc.BoardOpen,
+                    PinnedAt = sc.PinnedAt,
+                    TurnFromPeer = sc.TurnFromPeer,
                     // Restored waiting must be re-provable from the transcript, or the
                     // first scan clears it (a fork-phantom orange otherwise
                     // survives restarts — the persisted status said waiting and the
@@ -498,6 +516,10 @@ public partial class MainWindow : Window
                     LiveWorkflowIds = s.LiveWorkflowIds.ToList(),
                     GroupId = s.GroupId,
                     LastMessageAtUtc = s.LastMessageAtUtc,
+                    TabHostPid = s.TabHostPid,
+                    BoardOpen = s.BoardOpen,
+                    PinnedAt = s.PinnedAt,
+                    TurnFromPeer = s.TurnFromPeer,
                 });
             }
             cfg.Workspaces.Add(wc);
@@ -635,8 +657,13 @@ public partial class MainWindow : Window
         // connector happened to sync — an unfocused window reports less often than the sweep
         // runs, and a stale count is a decision made on someone else's evidence.
         foreach (var ws in Vm.Workspaces) ReapplyTabCorrelation(ws);
+        foreach (var ws in Vm.Workspaces.Where(w => w.IsSplit)) SyncGroupCardWindows(ws);
+        RetirePathlessDuplicates();
         RefreshOrphanSessions();
         RefreshExpandedCards();
+        // The cache clock moves with time alone, so nothing else would redraw it.
+        foreach (var ws in Vm.Workspaces)
+            foreach (var s in ws.Sessions) s.RefreshCacheWarmth();
         // A permission dialog freezes the transcript, so the scan above may find nothing
         // new — the threshold still has to be re-checked against the stored pending call.
         if (EvaluateAllPendingWaits())
@@ -805,8 +832,8 @@ public partial class MainWindow : Window
     /// the same windows connected throughout, so there is nothing left to be wrong about except
     /// whether the session is still alive somewhere else — and the silence guard answers that.
     ///
-    /// Measured 12-09-2026, which is why this exists: a user closed a tab in the purple window
-    /// at 10:31:56 and opened its successor in orange ten seconds later. Closing a
+    /// Measured 12-09-2026, which is why this exists: a user closed a tab in one VS Code window
+    /// at 10:31:56 and opened its successor in another ten seconds later. Closing a
     /// Claude tab fires no SessionEnd, so the dead card sat on the deck for the next ten minutes
     /// — and every click spent on it resumed it in a terminal (below), which restarted both
     /// clocks and made it outlive each attempt to deal with it.</summary>
@@ -1011,10 +1038,10 @@ public partial class MainWindow : Window
                 // then looks tabless at once.
                 //
                 // Measured 12-09-2026 at 20:28:53, twenty-four seconds after a deck restart: the
-                // orange instance had not finished reconnecting while purple, green and the
+                // third VS Code instance had not finished reconnecting while the other two and the
                 // TabTower window had, so a manual ↻ swept the union of three windows and
-                // closed SEVEN live orange cards in forty milliseconds: the whole orange group
-                // vanished. The same shape as 05-09, where the green instance going
+                // closed SEVEN live cards of the late instance in forty milliseconds: its whole
+                // group vanished. The same shape as 05-09, where one instance going
                 // down took seven sessions with it — the lesson was recorded then and the sweep
                 // was never taught it.
                 //
@@ -1920,6 +1947,12 @@ public partial class MainWindow : Window
 
     private void OnWindowDestroyed(IntPtr hwnd)
     {
+        // Group cards are not in Workspaces, so FindByHwnd below never sees their window.
+        foreach (var card in Vm.Workspaces.SelectMany(w => w.GroupCards).Where(c => c.Hwnd == hwnd))
+        {
+            card.Hwnd = IntPtr.Zero;
+            card.State = BindState.Disconnected;
+        }
         var ws = Vm.FindByHwnd(hwnd);
         if (ws == null) return;
         ws.Hwnd = IntPtr.Zero;
@@ -1976,6 +2009,18 @@ public partial class MainWindow : Window
         if (Vm.FindByHwnd(root) != null) return;   // connected to an existing workspace
 
         string title = NativeMethods.GetWindowTextSafe(root);
+        // A window the VS Code extension already reports belongs to a card that has its folder,
+        // even when no card is BOUND to it: a custom `window.title` matches no title pattern, so
+        // the bind above finds nothing. Making a card from its title here gave a second card with
+        // no folder that no hook could ever fill and no rebind could ever match (measured
+        // 21-10-2026), so a dragged window like that is refused.
+        if (WorkspaceOwningWindow(root, title) is { } owner)
+        {
+            LogService.Info("bind", $"drag-in refused: hwnd=0x{root.ToInt64():X} title=\"{title}\" is already " +
+                                    $"on the deck as ws=\"{owner.DisplayTitle}\" (its connector reports it)");
+            SetStatus($"That window is already on the deck as \"{owner.DisplayTitle}\"");
+            return;
+        }
         string name = WorkspaceNameFromTitle(title);
         if (name.Length == 0)
         {
@@ -1988,6 +2033,69 @@ public partial class MainWindow : Window
         ApplyDeckVisibility();
         SetStatus($"Workspace \"{name}\" added (drag-and-drop; the path fills in from the first hook)");
     }
+
+    /// <summary>The card (one with a folder) whose VS Code connector reports this window, or
+    /// null. Exact when focus correlation has identified the connector's window; until then the
+    /// window has to be in that connector's instance AND name its folder, the same evidence
+    /// RebindToConnectorWindow accepts for a custom title ("Work · .claude - ...").</summary>
+    private WorkspaceViewModel? WorkspaceOwningWindow(IntPtr hwnd, string title)
+    {
+        int pid = WindowEnumerator.GetProcessId(hwnd);
+        foreach (var conn in _connectors.ToList())
+        {
+            if (conn.WorkspacePath.Length == 0) continue;
+            bool exact = conn.Hwnd != IntPtr.Zero && conn.Hwnd == hwnd;
+            string leaf = WorkspaceMetadata.NameFromPath(conn.WorkspacePath);
+            bool sameInstance = conn.OwnerPid != 0 && conn.OwnerPid == pid && leaf.Length > 0 &&
+                                title.Contains(leaf, StringComparison.OrdinalIgnoreCase);
+            if (!exact && !sameInstance) continue;
+            if (Vm.FindByPath(conn.WorkspacePath) is { Path.Length: > 0 } ws) return ws;
+        }
+        return null;
+    }
+
+    /// <summary>Retire a card that only a drag-in could have made and that duplicates a window
+    /// another card already owns: no folder, never used, nothing on it, nothing the user set,
+    /// and a live VS Code window whose title it was cut from is reported by a connector of a
+    /// card that HAS the folder. Such a card can never bind (its pattern wants
+    /// "{name} - Visual Studio Code", a custom title never says that) and never fill its path
+    /// (every hook from that window resolves to the real card by cwd), so it reads "no window"
+    /// forever beside the card that does show the window. Every condition must hold, and the
+    /// removal is logged by name. On the 10s metadata tick; a deck with no folderless card
+    /// pays one Where over the cards.</summary>
+    private void RetirePathlessDuplicates()
+    {
+        var suspects = Vm.Workspaces.Where(w =>
+            w.Path.Length == 0 && w.Name.Length > 0 && w.Sessions.Count == 0 && !w.Hidden &&
+            w.LastUsedAt == null && w.UseCount == 0 &&
+            w.CustomTitle == null && w.CustomColor == null && w.Description.Length == 0).ToList();
+        if (suspects.Count == 0 || _connectors.Count == 0) return;
+        var windows = WindowEnumerator.GetCandidates()
+            .Where(c => WorkspaceMetadata.IsVsCodeProcess(c.ProcessName)).ToList();
+        bool removed = false;
+        foreach (var ws in suspects)
+        {
+            foreach (var w in windows)
+            {
+                if (!TitleIsCutFrom(ws.Name, w.Title)) continue;
+                if (WorkspaceOwningWindow(w.Hwnd, w.Title) is not { } owner) continue;
+                LogService.Info("config", $"retired folderless duplicate card [{ws.Id}] \"{ws.Name}\": its window " +
+                                          $"hwnd=0x{w.Hwnd.ToInt64():X} title=\"{w.Title}\" belongs to ws=\"{owner.DisplayTitle}\"");
+                Vm.Workspaces.Remove(ws);
+                removed = true;
+                break;
+            }
+        }
+        if (!removed) return;
+        UpdateEmptyHint();
+        ApplyDeckVisibility();
+        QueueSave();
+    }
+
+    /// <summary>Was this card's name cut from this window title by the drag-in (WorkspaceNameFromTitle)?</summary>
+    private static bool TitleIsCutFrom(string name, string title)
+        => title == name || title.StartsWith(name + " - ", StringComparison.Ordinal) ||
+           WorkspaceNameFromTitle(title) == name;
 
     /// <summary>"file - {workspace} - Visual Studio Code" → workspace segment.</summary>
     private static string WorkspaceNameFromTitle(string title)
@@ -2024,11 +2132,11 @@ public partial class MainWindow : Window
     /// the variable that binds it to one Claude Code configuration, and therefore to exactly one
     /// instance. Nothing else can answer the question, and two things were tried on the same day
     /// and both failed. Matching a session to a window by TAB LABEL fails when labels collide: two
-    /// live sessions carried the same title, one green and one purple. Reading each
+    /// live sessions carried the same title, one in each of two windows. Reading each
     /// CONNECTION's own tabs fails too, and worse: two extension hosts on one folder report
     /// IDENTICAL tab lists, so every session belongs to every window, the last connection in the
-    /// loop wins, and the stamp flipped green/purple twice a second (a long-running session
-    /// showed purple while it sat in the green window).</summary>
+    /// loop wins, and the stamp flipped between the two windows twice a second (a long-running session
+    /// showed the other window's group while it sat in its own).</summary>
     private void StampGroupFromHook(SessionViewModel s, HookInfo info)
     {
         // The hook sends the NAME of the session's CLAUDE_SECURESTORAGE_CONFIG_DIR; the group
@@ -2143,6 +2251,56 @@ public partial class MainWindow : Window
         return ($"session {sessionId} started in \"{ws.DisplayTitle}\" [idle]", true);
     }
 
+    // ---- sessions the deck never heard start ----
+
+    private static readonly TimeSpan RecoverySecondPass = TimeSpan.FromSeconds(60);
+
+    /// <summary>Cards for live sessions whose hooks fired while the deck was not running: a card
+    /// for each one the deck has never seen, and the card reopened for each one it closed on a
+    /// guess. Which records qualify, and why identity has to be proven first, is
+    /// <see cref="RegistryRecovery"/>. No group is stamped here: the window a session runs in comes
+    /// from its hooks only (StampGroupFromHook), and its next hook stamps it.</summary>
+    private void RecoverLiveSessions(string pass)
+    {
+        List<RegistryRecord> records;
+        try { records = SessionRegistry.ReadRecords(SessionRegistry.SessionsDir, SessionRegistry.ProjectsDir); }
+        catch (Exception ex) { LogService.Info("recover", $"{pass}: registry not read ({ex.Message})"); return; }
+        var plan = RegistryRecovery.Plan(records, id =>
+            Vm.FindSession(id) is { } f ? new KnownSession(f.Item2.Closed, f.Item2.EndReason) : null);
+        int created = 0, revived = 0;
+        foreach (var (r, action, why) in plan)
+        {
+            string id = r.SessionId ?? "?";
+            if (action == RecoveryAction.Create)
+            {
+                var info = new HookInfo(Transcript: r.Transcript, Source: "resume", Entrypoint: r.Entrypoint, Pid: r.Pid);
+                var (msg, ok) = StartSession(id, r.Cwd!, null, info);
+                LogService.Info("recover", $"session={id} pid={r.Pid} {(ok ? "card created" : "not created")}: {msg} ({why})");
+                if (ok) created++;
+            }
+            else if (action == RecoveryAction.Revive && Vm.FindSession(id) is { } found)
+            {
+                var (ws, s) = found;
+                string was = s.EndReason ?? "?";
+                ws = EnsureSessionHome(ws, s, r.Transcript);
+                s.Closed = false;
+                s.EndedAt = null;
+                s.EndReason = null;
+                s.OrphanSince = null;
+                s.TabGoneAt = null;
+                if (r.Transcript != null) s.TranscriptPath = r.Transcript;
+                ws.RefreshSessionVisibility();
+                AfterSessionChange(ws, s);
+                LogService.Info("recover", $"session={id} pid={r.Pid} revived (was closed as {was}) ws=\"{ws.DisplayTitle}\"");
+                revived++;
+            }
+            else
+                LogService.Debug("recover", $"session={id} pid={r.Pid?.ToString() ?? "?"} skipped: {why}");
+        }
+        LogService.Info("recover", $"{pass}: {records.Count} registry record(s), {created} card(s) created, {revived} revived");
+        if (created + revived > 0) { RefreshBlinkAndSummary(); QueueSave(); }
+    }
+
     private static void ApplyHookInfo(SessionViewModel session, HookInfo info)
     {
         // WHICH process spoke. The only check in the deck that can tell one session apart from
@@ -2212,8 +2370,22 @@ public partial class MainWindow : Window
     /// InjectedPrefix.StartsWithUnclosedBlock): with the browser extension connected, its 400
     /// characters were the start of that block and none of the user's words.</remarks>
     private static bool IsMachineWakeup(string detail)
-        => detail.TrimStart().StartsWith("<task-notification", StringComparison.Ordinal) ||
+        => IsTaskNotification(detail) ||
            InjectedPrefix.StartsWithUnclosedBlock(detail);
+
+    /// <summary>A background task (agent, shell, Monitor) reporting back: the harness wakes the
+    /// session with the notification envelope as its "prompt".</summary>
+    private static bool IsTaskNotification(string detail)
+        => detail.TrimStart().StartsWith("<task-notification", StringComparison.Ordinal);
+
+    /// <summary>A message another Claude session sent: it arrives as the prompt, in the harness's
+    /// envelope, with or without the line that introduces it.</summary>
+    private static bool IsFromAnotherSession(string detail)
+    {
+        string d = detail.TrimStart();
+        return d.StartsWith("Another Claude session sent a message", StringComparison.Ordinal) ||
+               d.StartsWith("<cross-session-message", StringComparison.Ordinal);
+    }
 
     /// <summary>Hook details (prompts, messages) become one bounded display line.</summary>
     private static string Sanitize(string s)
@@ -2307,6 +2479,41 @@ public partial class MainWindow : Window
         LogService.Info("status", $"session={sessionId} background agent launched " +
                                   $"({session.BackgroundAgents} out) ws=\"{ws.DisplayTitle}\"");
         return ($"session {sessionId}: {session.BackgroundAgents} background agents", true);
+    }
+
+    /// <summary>A board session reporting how many questions are open on it (`session board`),
+    /// or that it is no longer a board (null). Status-neutral: the session sends it mid-turn,
+    /// and the Stop that ends the turn is what the card then reads it against
+    /// (SessionViewModel.BoardOpen).</summary>
+    public (string, bool) SetSessionBoard(string sessionId, int? open)
+    {
+        if (Vm.FindSession(sessionId) is not { } found)
+            return ($"unknown session id {sessionId}", false);
+        var (ws, session) = found;
+        session.BoardOpen = open;
+        QueueSave();
+        RefreshBlinkAndSummary();
+        string what = open is { } n ? $"board, {n} open" : "not a board";
+        LogService.Info("status", $"session={sessionId} {what} ws=\"{ws.DisplayTitle}\"");
+        return ($"session {sessionId}: {what}", true);
+    }
+
+    /// <summary>Pin a session to the top of its window's block, or unpin it (`session pin`, and the
+    /// row's right-click menu). Pinning a session that is already pinned keeps its original time,
+    /// so a caller that pins itself again cannot jump back above a session pinned after it.</summary>
+    public (string, bool) SetSessionPinned(string sessionId, bool pinned)
+    {
+        if (Vm.FindSession(sessionId) is not { } found)
+            return ($"unknown session id {sessionId}", false);
+        var (ws, session) = found;
+        if (pinned == session.IsPinned)
+            return ($"session {sessionId}: already {(pinned ? "pinned" : "not pinned")}", true);
+        session.PinnedAt = pinned ? DateTime.Now : null;
+        SortSessions(ws);
+        QueueSave();
+        string what = pinned ? "pinned to the top" : "unpinned";
+        LogService.Info("status", $"session={sessionId} {what} ws=\"{ws.DisplayTitle}\"");
+        return ($"session {sessionId}: {what}", true);
     }
 
     /// <summary>A Workflow team was just launched (PostToolUse on a Workflow call that answered
@@ -2478,9 +2685,20 @@ public partial class MainWindow : Window
         // written for. Real activity from a hook (a prompt, a wait, an error) still clears it.
         // `replaced` is held the same way: a relay script marks it right after the kill, and while
         // no hook can follow a dead process, a Stop already in flight at that moment still can.
+        // A background task reporting back after the close-out is held too: its wakeup arrives as
+        // a UserPromptSubmit, but nobody typed it, and the session's answer is a line saying there
+        // is nothing left to do. Measured 16-10-2026: a login helper started mid-session exited 90s
+        // after the session was closed out, and its notification turned a closed-out card purple for good.
         bool keepMark = prev is (SessionStatus.Wrapped or SessionStatus.Replaced) &&
-                        (status is SessionStatus.Done or SessionStatus.Idle || agentsHeldTurn);
+                        (status is SessionStatus.Done or SessionStatus.Idle || agentsHeldTurn ||
+                         status == SessionStatus.Working && info.Detail is { } wake && IsTaskNotification(wake));
         if (!keepMark) session.Status = status;
+        // Who started this turn: the user, or a message from another session (see
+        // SessionViewModel.UpdatedByPeer). Decided on the prompt; a machine wakeup mid-turn leaves
+        // it as it was, because it continues a turn someone else started.
+        if (status == SessionStatus.Working && !agentsHeldTurn && info.Detail is { Length: > 0 } prompt &&
+            !IsMachineWakeup(prompt))
+            session.TurnFromPeer = IsFromAnotherSession(prompt);
         if (keepMark)
             LogService.Info("status", $"session={sessionId} kept {SessionStatusNames.ToName(prev)} (ignored →{SessionStatusNames.ToName(status)})");
         else if (prev != status)
@@ -2647,9 +2865,13 @@ public partial class MainWindow : Window
         // reading every row). The window blocks stay put; only the rows inside one move.
         // A card whose sessions carry no group is unaffected: they all sort equal and fall
         // through to the recency order, which is what every other card has always had.
+        // A pinned open session heads its window's block (newest pin first), and only then does
+        // recency order the rest. Inside the window, never above it: the blocks stay put.
         var desired = ws.Sessions
             .OrderBy(s => s.Closed ? 1 : 0)
             .ThenBy(s => s.GroupOrder)
+            .ThenBy(s => !s.Closed && s.IsPinned ? 0 : 1)
+            .ThenByDescending(s => s.Closed ? null : s.PinnedAt)
             .ThenByDescending(s => s.LastEventAt ?? s.EndedAt ?? s.StartedAt)
             .ToList();
         for (int target = 0; target < desired.Count; target++)
@@ -2854,6 +3076,7 @@ public partial class MainWindow : Window
         conn.Focused = sync.Focused;
         conn.Version = sync.Version ?? "";
         if (sync.Focused) conn.LastFocusedAt = DateTime.Now;
+        IntPtr hwndBefore = conn.Hwnd;
         CorrelateConnectorWindow(conn);
         if (isNew)
         {
@@ -2867,6 +3090,9 @@ public partial class MainWindow : Window
         {
             // The extension is the fresher branch source (event-driven vs our 10s poll).
             if (!string.IsNullOrEmpty(sync.Branch)) ws.Branch = sync.Branch;
+            // A window that just connected or just identified itself is the moment a group
+            // card can show it; the 10s tick covers the rest without a window scan per sync.
+            if (ws.IsSplit && (isNew || conn.Hwnd != hwndBefore)) SyncGroupCardWindows(ws);
             var labels = ApplyConnectorState(ws);
             // The tab list is almost the whole weight of this line and it grows with the window:
             // with the 38 Claude tabs of one .claude window it is ~600 of the line's ~690 chars,
@@ -2889,6 +3115,7 @@ public partial class MainWindow : Window
                 RefreshBlinkAndSummary();
                 QueueSave();
             }
+            NoteTabHosts(ws);
 
             // Extreme activity sort (request 2026-07-19): switching to a session's tab in
             // VSCode counts as activity — the session jumps to the top of its card.
@@ -2944,6 +3171,7 @@ public partial class MainWindow : Window
         _connectors.Remove(conn);
         if (_shuttingDown) return;
         if (conn.WorkspacePath.Length == 0 || Vm.FindByPath(conn.WorkspacePath) is not { } ws) return;
+        SyncGroupCardWindows(ws);
         if (ConnectorCount(ws) > 0)
         {
             // Another window still has this folder open — recompute from the survivors
@@ -2965,10 +3193,10 @@ public partial class MainWindow : Window
     ///
     /// Case-INSENSITIVE, because case is not identity here and the tab keeps whichever
     /// spelling it was born with. Measured 11-09-2026: a user ended the Claude-infra session in
-    /// the purple window and opened its successor in orange; Claude Code titled the new one
+    /// one window and opened its successor in another; Claude Code titled the new one
     /// "claude-infra" while the tab still read "Claude-infra", so the one live tab matched only
-    /// the DEAD session — whose card then sat in purple saying "ended — tab open", which is the
-    /// ghost that was reported, while the live orange session held no tab and was queued for the
+    /// the DEAD session — whose card then sat there saying "ended — tab open", which is the
+    /// ghost that was reported, while the live successor held no tab and was queued for the
     /// same false orphan close as the session described in MatchTabLabel.</summary>
     private static bool TabLabelMatches(string label, string title)
     {
@@ -3159,6 +3387,37 @@ public partial class MainWindow : Window
                 LogService.Info("status", $"session={s.SessionId} its tab \"{label}\" left VSCode " +
                                           $"ws=\"{ws.DisplayTitle}\" — closing the card in {TabClosedTtl.TotalSeconds:0}s unless it speaks");
             }
+        }
+    }
+
+    /// <summary>Record, for every open session whose tab is in view, WHICH extension host holds
+    /// it (SessionViewModel.TabHostPid). OpenSessionInVscode reads it to tell the two shapes of
+    /// "no tab" apart: a tab closed in a window that is still up (resume into a panel there,
+    /// as Claude Code's own session list does) and a window that died or reloaded since (the
+    /// terminal route). Picked the way FindConnector picks, minus its per-call log line, since
+    /// this runs on every sync; written only when that connector really carries the tab.</summary>
+    private void NoteTabHosts(WorkspaceViewModel ws)
+    {
+        var conns = ConnectorsFor(ws);
+        if (conns.Count == 0) return;
+        foreach (var s in ws.Sessions.Where(s => !s.Closed && !s.Phantom))
+        {
+            VscodeConnection? host;
+            if (conns.Count == 1)
+                host = conns[0];
+            else if (s.GroupId.Length > 0 && GroupsFor(ws).FirstOrDefault(g => g.Id == s.GroupId) is { } home)
+            {
+                var inHome = ConnectorsInGroup(ws, home);
+                host = inHome.LastOrDefault(c => c.Tabs.Any(t => TabLabelMatches(t.Label, s)))
+                       ?? (s.OpenAsTab && inHome.Count == 1 ? inHome[0] : null);
+            }
+            else
+                host = conns.LastOrDefault(c => c.Tabs.Any(t => TabLabelMatches(t.Label, s)));
+            if (host == null) continue;
+            // A tab claimed by elimination matches no label of its own, so OpenAsTab is the
+            // only evidence for it; otherwise the picked window must show one of its labels.
+            if (s.OpenAsTab || host.Tabs.Any(t => TabLabelMatches(t.Label, s)))
+                s.TabHostPid = host.Pid;
         }
     }
 
@@ -3430,8 +3689,8 @@ public partial class MainWindow : Window
 
         // The session's own instance, when we know it, decides — and it OUTRANKS the window
         // that appears to hold its tab, because a tab is matched by LABEL and labels collide.
-        // Measured 05-09-2026: the same title was carried by two live sessions, one green
-        // and one purple, so the purple window "held the tab" of a green session and the reopen
+        // Measured 05-09-2026: the same title was carried by two live sessions in two
+        // different windows, so the wrong window "held the tab" of the other session and the reopen
         // landed there. Inside the right instance a label match is still the best pick, since
         // that instance may have several windows.
         // A group whose instance is not connected returns null deliberately: the caller parks
@@ -3486,11 +3745,11 @@ public partial class MainWindow : Window
     /// <summary>The group the keys held right now ask for on this card, or null when the card
     /// has no groups. Called at the moment of the click: a modifier is only ever true while
     /// the gesture is happening.</summary>
-    public SessionGroupConfig? GroupForModifiers(WorkspaceViewModel ws)
+    public SessionGroupConfig? GroupForModifiers(WorkspaceViewModel ws, string? held = null)
     {
         var groups = GroupsFor(ws);
         if (groups.Count == 0) return null;
-        string held = HeldModifierName();
+        held ??= HeldModifierName();
         return groups.FirstOrDefault(g => NormalizeModifier(g.Modifier) == held);
     }
 
@@ -3595,6 +3854,74 @@ public partial class MainWindow : Window
             .Where(w => WorkspaceMetadata.IsVsCodeProcess(w.ProcessName)).ToList();
         var groups = GroupsFor(ws);
         return conns.Where(c => GroupIdOf(c, windows, groups) == group.Id).ToList();
+    }
+
+    /// <summary>Give each group card of a split workspace the window of ITS OWN group, so the
+    /// card can show that window's live preview.
+    ///
+    /// The parent binds one window, by title pattern or by connector, and a custom
+    /// `window.title` per instance means the title pattern matches none of them. Group cards
+    /// never bound anything, so they hid the preview band altogether. The group's title marker
+    /// is what tells the instances apart (the same test ConnectorInGroup makes), so it is used
+    /// here directly. Presentation only: the window is set on the group card, which is not in
+    /// MainViewModel.Workspaces, so FindByHwnd, the rebind paths and persistence never see it.
+    ///
+    /// Strongest evidence first: the group's connector window once focus has identified it;
+    /// otherwise a VS Code window whose title carries the group's marker AND names the folder,
+    /// preferring the connector's own instance. A marker alone is not enough, because one
+    /// instance can have windows on other folders. No evidence, no preview.</summary>
+    private void SyncGroupCardWindows(WorkspaceViewModel ws)
+    {
+        if (ws.GroupCards.Count == 0) return;
+        var conns = ConnectorsFor(ws);
+        var windows = WindowEnumerator.GetCandidates()
+            .Where(w => WorkspaceMetadata.IsVsCodeProcess(w.ProcessName)).ToList();
+        var groups = GroupsFor(ws);
+        string leaf = WorkspaceMetadata.NameFromPath(ws.Path);
+        var taken = new HashSet<IntPtr>();
+        foreach (var card in ws.GroupCards)
+        {
+            var group = groups.FirstOrDefault(g =>
+                string.Equals(g.Id, card.GroupId, StringComparison.OrdinalIgnoreCase));
+            CandidateWindow? match = null;
+            if (group != null && group.TitleMarker.Length > 0)
+            {
+                var conn = conns.LastOrDefault(c => GroupIdOf(c, windows, groups) == group.Id);
+                var marked = windows.Where(w => !taken.Contains(w.Hwnd) &&
+                                                w.Title.Contains(group.TitleMarker, StringComparison.Ordinal))
+                                    .ToList();
+                match = (conn != null && conn.Hwnd != IntPtr.Zero
+                            ? marked.FirstOrDefault(w => w.Hwnd == conn.Hwnd) : null)
+                     ?? (leaf.Length > 0
+                            ? marked.Where(w => w.Title.Contains(leaf, StringComparison.OrdinalIgnoreCase))
+                                    .OrderBy(w => conn != null && conn.OwnerPid != 0 &&
+                                                  WindowEnumerator.GetProcessId(w.Hwnd) == conn.OwnerPid ? 0 : 1)
+                                    .FirstOrDefault()
+                            : null);
+            }
+            IntPtr hwnd = match?.Hwnd ?? IntPtr.Zero;
+            if (hwnd != IntPtr.Zero) taken.Add(hwnd);
+            if (match != null) card.WindowTitle = match.Title;
+            if (card.Hwnd == hwnd) continue;
+            card.Hwnd = hwnd;
+            card.State = hwnd != IntPtr.Zero ? BindState.Connected : BindState.Disconnected;
+            LogService.Info("cards", hwnd != IntPtr.Zero
+                ? $"group card \"{card.GroupId}\" shows window hwnd=0x{hwnd.ToInt64():X} title=\"{match!.Title}\""
+                : $"group card \"{card.GroupId}\" has no window of its own");
+        }
+    }
+
+    /// <summary>A click on a card: a group card that shows a window of its own raises THAT
+    /// window, the one in its preview. Everything else goes through the parent, as before.</summary>
+    public (bool, string) FocusCard(WorkspaceViewModel card)
+    {
+        if (card.IsGroupCard && card.State == BindState.Connected && NativeMethods.IsWindow(card.Hwnd))
+        {
+            card.Owner.LastUsedAt = DateTime.Now;   // same usage stamp FocusWorkspace gives
+            WindowActions.Focus(card.Hwnd);
+            return (true, "");
+        }
+        return FocusWorkspace(card.Owner);
     }
 
     /// <summary>Is the group's instance on screen at all? Separates "not running" (launch it)
@@ -3815,7 +4142,7 @@ public partial class MainWindow : Window
         {
             // Its own instance is down. Bring THAT one back and hand it the session there —
             // never a sibling window, which would open a blank tab on a session it has never
-            // heard of (05-09-2026, the green instance going down took five with it).
+            // heard of (05-09-2026, one instance going down took five with it).
             if (session.GroupId.Length > 0 &&
                 GroupsFor(ws).FirstOrDefault(g => g.Id == session.GroupId) is { } home)
                 return QueueGroupSession(ws, null, home, session.SessionId);
@@ -3828,7 +4155,7 @@ public partial class MainWindow : Window
         // in the new one's. `editor.open` then opens a blank conversation and does not throw, so
         // nothing detects it. `claude --resume` reads the transcript off disk instead and needs
         // no registry, so ask for the terminal route in exactly that case (measured 05-09-2026:
-        // two of the seven sessions recovered from the dead green instance came back empty, and
+        // two of the seven sessions recovered from the dead instance came back empty, and
         // both resumed first try from a terminal).
         // Decide on this second's correlation, not on whenever the last connector synced: an
         // unfocused window reports slowly, and this reads ws.UnexplainedTabs below.
@@ -3867,9 +4194,21 @@ public partial class MainWindow : Window
         // path applied. Revealing instead is the right fallback and always was: Claude Code's own
         // id→panel registry is the one thing that can find a tab the label cannot.
         bool tablessProven = !tabIsHere && ws.UnexplainedTabs == 0;
-        bool viaTerminal = allowTerminal && tablessProven && conn.SupportsTerminalResume;
+        // ...and the terminal is for a session whose WINDOW is gone, not merely its tab. When
+        // the extension host that last held its tab is the very connector answering now, the
+        // window never died or reloaded: the tab was closed in it, and Claude Code there resumes
+        // the id into a panel, exactly as the phone's Reopen does (0.11.13). Measured 11-10-2026
+        // 10:15:26: eight tabs closed at once in a live window, and the card clicks that
+        // followed brought them back as terminals. A session still running in a terminal the
+        // deck opened is left on the old route: a panel beside it would be a second process.
+        bool sameHost = session.TabHostPid != 0 && session.TabHostPid == conn.Pid &&
+                        (!session.ResumedInTerminal || session.Closed);
+        bool viaTerminal = allowTerminal && !sameHost && tablessProven && conn.SupportsTerminalResume;
         if (!tabIsHere && tablessProven && !allowTerminal)
             LogService.Info("route", $"session={session.SessionId} → panel resume in its own window (terminal not allowed by the caller)");
+        else if (!tabIsHere && tablessProven && sameHost)
+            LogService.Info("route", $"session={session.SessionId} → panel resume in its own window " +
+                                     $"(its tab was last seen in host pid={conn.Pid}, which is still connected)");
         else if (!tabIsHere && !tablessProven)
             LogService.Info("route", $"session={session.SessionId} revealed, NOT resumed — " +
                                      $"{ws.UnexplainedTabs} tab(s) here answer to nobody and one may be its");
@@ -3959,20 +4298,22 @@ public partial class MainWindow : Window
     {
         if (Vm.FindSession(sessionId) is not { } found) return (false, $"unknown session id {sessionId}");
         var (ws, session) = found;
-        // Both refusals exist for ONE reason: this path reveals, and a reveal of a session this
-        // window holds no panel for RESUMES it off its transcript (measured 05-09-2026). The connector
-        // catches that and closes the resumed tab again, but the cheapest handling is not to
-        // reveal a session the deck already knows is gone. What is left after these two is a
-        // session that died without the deck hearing about it, which no liveness check can
-        // answer here - a pid outlives its process and Windows recycles them.
-        if (session.Status == SessionStatus.Replaced)
-            return (false, "this session was replaced by a successor and its process was ended; the deck closes its tab on its own, by label, because revealing a dead session revives it");
-        if (session.Closed)
-            return (false, "this session has already ended: revealing it would resume it off its transcript, so its tab is left for you to close. Pass --close-tab to `session end` instead, which asks while the session is still alive");
-        var conn = FindConnector(ws, session);
-        if (conn == null) return (false, "no VSCode connector for this workspace");
-        if (!conn.SupportsCloseSessionById)
-            return (false, $"the VSCode window's TabTower extension ({(conn.Version.Length > 0 ? conn.Version : "pre-0.6.12")}) cannot close a tab by session id: reload that window to update it");
+        // Every refusal exists for ONE reason: this path reveals, and a reveal of a session this
+        // window holds no panel for RESUMES it off its transcript (measured 05-09-2026), or does
+        // nothing, after which what is in front is some other tab. So a session the deck knows is
+        // gone is never revealed, and neither is one whose process Claude Code's own live-session
+        // registry shows as not running (0.11.35, see CloseTabRoute: on 17-10-2026 such a close
+        // took a live tab no request had named). The registry check proves the process, not only
+        // the pid, so a recycled pid does not pass for the session.
+        bool askable = session.Status != SessionStatus.Replaced && !session.Closed;
+        var (process, processWhy) = askable ? SessionRegistry.Probe(sessionId) : (ProcessState.Unknown, "");
+        var conn = askable && process != ProcessState.Gone ? FindConnector(ws, session) : null;
+        var (action, why) = CloseTabRoute.Decide(session.Status == SessionStatus.Replaced, session.Closed,
+                                                 process, processWhy, conn != null,
+                                                 conn?.SupportsCloseSessionById ?? false, conn?.Version ?? "");
+        if (action == CloseTabAction.NoOp)
+            LogService.Info("close", $"session={sessionId} closeSession by id NOT sent, no tab touched: process {process} ({processWhy})");
+        if (action != CloseTabAction.ById || conn == null) return (false, why);
         var labels = TabLabelsOf(session);
         if (!conn.TrySend(new { Cmd = "closeSession", SessionId = sessionId, Labels = labels, ById = true }))
         {
@@ -3980,7 +4321,7 @@ public partial class MainWindow : Window
             return (false, "connector connection lost");
         }
         LogService.Info("close", $"session={sessionId} closeSession by id → pid={conn.Pid} " +
-                                 $"(ext {conn.Version}) labels=[{string.Join(" | ", labels)}]");
+                                 $"(ext {conn.Version}, process {process}) labels=[{string.Join(" | ", labels)}]");
         return (true, "");
     }
 
