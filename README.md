@@ -4,7 +4,7 @@
 
 With several Claude Code sessions running at once, the hard part is knowing when one needs you. A session stops to ask for permission or finishes its turn, then waits unnoticed while you work in another VS Code window. TabTower puts every session on one live deck, blinks the one that is waiting for you, and takes you straight to it in one click.
 
-![TabTower in action: a waiting session blinks orange on the deck, and one click opens its tab in VS Code](site/assets/hero.gif)
+![TabTower in action: a waiting session blinks orange on the deck, and one click opens its tab in VS Code](site/assets/hero-plain.gif)
 
 > Actively developed. MIT licensed. [Latest release](https://github.com/tabtower/tabtower/releases/latest) · [changelog](CHANGELOG.md)
 
